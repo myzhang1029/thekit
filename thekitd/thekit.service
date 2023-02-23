@@ -1,0 +1,14 @@
+[Unit]
+Description=The Kit web service
+Wants=syslog.service local-fs.target network.target
+
+[Service]
+Restart=always
+StandardOutput=syslog
+StandardError=syslog
+# Prevent feedback loop https://unix.stackexchange.com/questions/42964
+ExecStartPre=/usr/bin/stty -F /dev/ttyACM0 -hupcl -echo -onlcr
+ExecStart=/usr/sbin/thekitd
+
+[Install]
+WantedBy=multi-user.target
