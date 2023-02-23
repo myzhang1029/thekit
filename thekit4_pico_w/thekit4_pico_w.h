@@ -1,6 +1,6 @@
 /*
  *  thekit4_pico_w.h
- *  Copyright (C) 2022 Zhang Maiyun <me@myzhangll.xyz>
+ *  Copyright (C) 2022-2023 Zhang Maiyun <me@myzhangll.xyz>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -66,7 +66,6 @@ struct wifi_config_entry {
 };
 
 extern bool has_cyw43;
-extern bool time_in_sync;
 
 void temperature_init(void);
 float temperature_measure(void);
@@ -87,5 +86,35 @@ void http_server_close(struct http_server *arg);
 
 void tasks_init(void);
 bool tasks_check_run(void);
+
+void gps_init(void);
+bool gps_get_time(datetime_t *dt);
+bool gps_get_location(float *lat, float *lon, float *alt);
+uint8_t gps_get_sat_num(void);
+void gps_parse_available(void);
+bool gpsutil_parse_sentence_gga(
+    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t *hour, uint8_t *min, float *sec,
+    float *lat, float *lon,
+    uint8_t *fix_quality, uint8_t *num_satellites,
+    float *hdop, float *altitude, float *geoid_sep
+);
+bool gpsutil_parse_sentence_gll(
+    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t *hour, uint8_t *min, float *sec,
+    float *lat, float *lon, bool *valid, bool *included_time
+);
+bool gpsutil_parse_sentence_rmc(
+    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t *hour, uint8_t *min, float *sec,
+    float *lat, float *lon, bool *valid
+);
+bool gpsutil_parse_sentence_zda(
+    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t *hour, uint8_t *min, float *sec,
+    uint16_t *year, uint8_t *month, uint8_t *day,
+    uint8_t *zone_hour, uint8_t *zone_min
+);
+
 
 #endif

@@ -20,5 +20,5 @@ add_compile_options(-Ofast
     -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
 )
 
-add_subdirectory(../thekit2_pico thekit2_pico)
-add_subdirectory(../thekit4_pico_w thekit4_pico_w)
+add_subdirectory(thekit2_pico)
+add_subdirectory(thekit4_pico_w)

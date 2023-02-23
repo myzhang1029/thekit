@@ -23,6 +23,9 @@
 #ifndef ENABLE_NTP
 #define ENABLE_NTP 1
 #endif
+#ifndef ENABLE_GPS
+#define ENABLE_GPS 1
+#endif
 
 // Light-related
 #if ENABLE_LIGHT
@@ -91,6 +94,17 @@ static const uint16_t NTP_PORT = 123;
 static const uint32_t NTP_INTERVAL_MS = 600 * 1000;
 // Crude TZ conversion
 static const int TZ_DIFF_SEC = -8 * 3600;
+#endif
+
+// GPS-related
+#if ENABLE_GPS
+#define GPS_UART uart0
+// TX is not actually used
+static const uint GPS_TX_PIN = 12;
+static const uint GPS_RX_PIN = 13;
+static const uint GPS_EN_PIN = 14;
+static const uint GPS_PPS_PIN = 15;
+static const uint GPS_BAUD = 9600;
 #endif
 
 // Networking-related

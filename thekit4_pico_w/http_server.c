@@ -2,7 +2,7 @@
  *  http_server.c
  *  Heavily refactored from BSD-3-Clause picow_tcp_server.c
  *  Copyright (c) 2022 Raspberry Pi (Trading) Ltd.
- *  Copyright (C) 2022 Zhang Maiyun <me@myzhangll.xyz>
+ *  Copyright (C) 2022-2023 Zhang Maiyun <me@myzhangll.xyz>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -162,24 +162,38 @@ static bool http_req_check_parse(struct http_server_conn *conn) {
         // unlikely
         || pbuf_memcmp(conn->received, offset_path, "/get_info\r", 2) == 0) {
         // Max length + nn\r\n\r\n + \0
-        char response[48] = {0};
+        char response[121] = {0};
         size_t length;
 #if ENABLE_TEMPERATURE_SENSOR
         float temperature = temperature_measure();
 #else
-        float temperature = nan("unavailable");
+        // JSON doesn't support NaN
+        float temperature = -1024;
 #endif
 #if ENABLE_LIGHT
         extern uint16_t current_pwm_level;
 #else
         uint16_t current_pwm_level = 0;
 #endif
+#if ENABLE_GPS
+        float lat, lon, alt;
+        if (!gps_get_location(&lat, &lon, &alt)) {
+            lat = -1024;
+            lon = -1024;
+            alt = -1024;
+        }
+#else
+        float lat = -1024, lon = -1024, alt = -1024;
+#endif
         /* Generate response */
-        length = snprintf(response, 48,
-                     "41\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u}",
-                     temperature, (unsigned)current_pwm_level);
-        snprintf(response, 48, "%u\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u}",
-                 (unsigned)length - 6, temperature, (unsigned)current_pwm_level);
+        length = snprintf(response, 121,
+                     "113\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u, "
+                     "\"latitude\": %.6f, \"longitude\": %.6f, \"altitude\": %.3f}",
+                     temperature, (unsigned)current_pwm_level, lat, lon, alt);
+        snprintf(response, 121, "%u\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u, "
+                "\"latitude\": %.6f, \"longitude\": %.6f, \"altitude\": %.3f}",
+                 (unsigned)length - 7, temperature, (unsigned)current_pwm_level,
+                 lat, lon, alt);
         http_conn_write(conn, resp_200_pre, sizeof(resp_200_pre) - 1, 0);
         http_conn_write(conn, resp_common, sizeof(resp_common) - 1, 0);
         // This one needs to be copied

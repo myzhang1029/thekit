@@ -1,7 +1,7 @@
 /* The entire The Kit on Raspberry Pi Pico W */
 /*
  *  thekit4_pico_w.c
- *  Copyright (C) 2022 Zhang Maiyun <me@myzhangll.xyz>
+ *  Copyright (C) 2022-2023 Zhang Maiyun <me@myzhangll.xyz>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -32,7 +32,6 @@
 #endif
 
 bool has_cyw43 = false;
-bool time_in_sync = false;
 struct ntp_client ntp_state;
 struct http_server http_state;
 
@@ -45,6 +44,9 @@ static void init() {
 #endif
 #if ENABLE_TEMPERATURE_SENSOR
     temperature_init();
+#endif
+#if ENABLE_GPS
+    gps_init();
 #endif
 
     if (cyw43_arch_init() != 0) {
@@ -98,6 +100,12 @@ int main() {
         watchdog_update();
 #endif
         tasks_check_run();
+#if ENABLE_WATCHDOG
+        watchdog_update();
+#endif
+#if ENABLE_GPS
+        gps_parse_available();
+#endif
 #if ENABLE_WATCHDOG
         watchdog_update();
 #endif
