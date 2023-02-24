@@ -18,14 +18,18 @@
 
 //! Yet another ad-hoc GPS NMEA-0183 parser.
 
+#include "gps_util.h"
+
 #include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 #ifdef GPS_UTIL_TEST
 #include <assert.h>
+#include <string.h>
 #define assert_eq(a, b) assert((a) == (b))
 #define assert_float_eq(a, b) assert(fabs((a) - (b)) < 1e-5)
 #endif
@@ -33,7 +37,7 @@
 // Everything returns false for invalid input
 
 /// Parse an unsigned integer
-static inline bool parse_integer(uint8_t *checksum, uint32_t *cursor, char *buffer, uint32_t buffer_len, uint32_t *result) {
+static inline bool parse_integer(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, uint32_t *result) {
     uint32_t value = 0;
     char c;
 
@@ -69,7 +73,7 @@ static void test_parse_integer(void) {
 #endif
 
 /// Parse a floating point number
-static inline bool parse_float(uint8_t *checksum, uint32_t *cursor, char *buffer, uint32_t buffer_len, float *result) {
+static inline bool parse_float(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, float *result) {
     uint32_t integer_part = 0;
     uint32_t decimal_part = 0;
     uint32_t decimal_part_len = 0;
@@ -136,7 +140,7 @@ static void test_parse_float(void) {
 
 /// Take a single character.
 /// If the following character is a comma or an asterisk, return EOF and the cursor and the checksum are not modified.
-static inline int16_t parse_single_char(uint8_t *checksum, uint32_t *cursor, char *buffer, uint32_t buffer_len) {
+static inline int16_t parse_single_char(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len) {
     if (*cursor >= buffer_len) {
         return EOF;
     }
@@ -177,7 +181,7 @@ static void test_parse_single_char(void) {
 #endif
 
 /// Parse a h?hmmss.?s* string.
-static bool parse_hms(uint8_t *checksum, uint32_t *cursor, char *buffer, uint32_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
+static bool parse_hms(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
     uint32_t hms;
     if (!parse_integer(checksum, cursor, buffer, buffer_len, &hms)) {
         return false;
@@ -247,7 +251,7 @@ static void test_parse_hms(void) {
 #endif
 
 /// Parse a d?d?dmm.?m* string.
-static bool parse_dm(uint8_t *checksum, uint32_t *cursor, char *buffer, uint32_t buffer_len, uint16_t *deg, float *min) {
+static bool parse_dm(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, uint16_t *deg, float *min) {
     uint32_t dms;
     if (!parse_integer(checksum, cursor, buffer, buffer_len, &dms)) {
         return false;
@@ -302,7 +306,7 @@ static void test_parse_dm(void) {
 #endif
 
 /// Parse the trailing '*hh' part of a NMEA sentence.
-static inline bool check_checksum(uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len) {
+static inline bool check_checksum(uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len) {
     if (cursor + 3 > buffer_len) {
         return false;
     }
@@ -334,9 +338,7 @@ static void test_check_checksum(void) {
 }
 #endif
 
-// Always check the checksum before committing to the `gps_status` struct
-
-static inline void consume_until_checksum(uint8_t *checksum, uint32_t *cursor, char *buffer, uint32_t buffer_len) {
+static inline void consume_until_checksum(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len) {
     while (*cursor < buffer_len) {
         char c = buffer[(*cursor)++];
         if (c == '*') {
@@ -355,7 +357,7 @@ static inline void consume_until_checksum(uint8_t *checksum, uint32_t *cursor, c
 } while (0)
 
 bool gpsutil_parse_sentence_gga(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     float *lat, float *lon,
     uint8_t *fix_quality, uint8_t *num_satellites,
@@ -524,12 +526,11 @@ static void test_parse_sentence_gga(void) {
 #endif
 
 bool gpsutil_parse_sentence_gll(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
-    float *lat, float *lon, bool *valid, bool *included_time
+    float *lat, float *lon, bool *valid
 ) {
-    // dddmm.mmmmm, [NS], dddmm.mmmmm, [EW](, hhmmss.ss, [AV])
-    // Sometimes the time is included, sometimes it is not
+    // dddmm.mmmmm, [NS], dddmm.mmmmm, [EW], hhmmss.ss, [AV], ...
     uint16_t deg;
     float min_parser;
     if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
@@ -566,29 +567,22 @@ bool gpsutil_parse_sentence_gll(
         // Invalid value
         return false;
     }
-    // Look-ahead to see if there is a time
-    c = buffer[cursor];
-    if (c == ',') {
-        *included_time = true;
-        checksum ^= c;
-        cursor++;
-        if (!parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec)) {
-            return false;
-        }
-        checksum ^= (c = buffer[cursor++]);
-        if (c != ',') {
-            return false;
-        }
-        checksum ^= (c = buffer[cursor++]);
-        if (c == 'A') {
-            *valid = true;
-        } else if (c == 'V') {
-            *valid = false;
-        } else {
-            return false;
-        }
+    COMMA_OR_FAIL(cursor);
+    if (!parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec)) {
+        return false;
+    }
+    COMMA_OR_FAIL(cursor);
+    next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
+    if (next == 'A') {
+        *valid = true;
+    } else if (next == 'V') {
+        *valid = false;
+    } else if (next == EOF) {
+        // Empty field
+        *valid = false;
     } else {
-        *included_time = false;
+        // Invalid value
+        return false;
     }
     // There is also an optional mode, which is unused
     consume_until_checksum(&checksum, &cursor, buffer, buffer_len);
@@ -604,22 +598,6 @@ static void test_parse_sentence_gll(void) {
     float lat;
     float lon;
     bool valid;
-    bool included_time;
-    char buffer[] = "GPGLL,3751.65,S,14507.36,E*77";
-    uint32_t buffer_len = sizeof(buffer) - 1;
-    assert_eq(buffer_len, 29);
-    uint32_t cursor = 6;
-    for (uint32_t i = 0; i < cursor; i++) {
-        checksum ^= buffer[i];
-    }
-    assert(gpsutil_parse_sentence_gll(
-        checksum, cursor, buffer, buffer_len,
-        &hour, &min, &sec, &lat, &lon, &valid, &included_time
-    ));
-    assert_float_eq(lat, -37.860833);
-    assert_float_eq(lon, 145.122666);
-    assert(!included_time);
-    checksum = 0;
     char buffer2[] = "GNGLL,4922.1031,N,10022.1234,W,002434.000,A,A*5F";
     uint32_t buffer2_len = sizeof(buffer2) - 1;
     assert_eq(buffer2_len, 48);
@@ -629,11 +607,10 @@ static void test_parse_sentence_gll(void) {
     }
     assert(gpsutil_parse_sentence_gll(
         checksum, cursor2, buffer2, buffer2_len,
-        &hour, &min, &sec, &lat, &lon, &valid, &included_time
+        &hour, &min, &sec, &lat, &lon, &valid
     ));
     assert_float_eq(lat, 49.368385);
     assert_float_eq(lon, -100.368723);
-    assert(included_time);
     assert_eq(hour, 0);
     assert_eq(min, 24);
     assert_float_eq(sec, 34.0);
@@ -649,11 +626,10 @@ static void test_parse_sentence_gll(void) {
     }
     assert(gpsutil_parse_sentence_gll(
         checksum, cursor3, buffer3, buffer3_len,
-        &hour, &min, &sec, &lat, &lon, &valid, &included_time
+        &hour, &min, &sec, &lat, &lon, &valid
     ));
     assert_float_eq(lat, 0.0);
     assert_float_eq(lon, 0.0);
-    assert(included_time);
     assert_eq(hour, 0);
     assert_eq(min, 0);
     assert_float_eq(sec, 0.0);
@@ -662,7 +638,7 @@ static void test_parse_sentence_gll(void) {
 
 #endif
 bool gpsutil_parse_sentence_rmc(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     float *lat, float *lon, bool *valid
 ) {
@@ -750,7 +726,7 @@ static void test_parse_sentence_rmc(void) {
         &hour, &min, &sec, &lat, &lon, &valid
     ));
     assert_float_eq(lat, -37.860833);
-    assert_float_eq(lon, 145.122666);
+    assert_float_eq(lon, 145.122667);
     assert_eq(hour, 8);
     assert_eq(min, 18);
     assert_float_eq(sec, 36.0);
@@ -767,7 +743,7 @@ static void test_parse_sentence_rmc(void) {
         checksum, cursor2, buffer2, buffer2_len,
         &hour, &min, &sec, &lat, &lon, &valid
     ));
-    assert_float_eq(lat, 37.666666);
+    assert_float_eq(lat, 37.666667);
     assert_float_eq(lon, -122.383333);
     assert_eq(hour, 0);
     assert_eq(min, 13);
@@ -796,7 +772,7 @@ static void test_parse_sentence_rmc(void) {
 #endif
 
 bool gpsutil_parse_sentence_zda(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     uint16_t *year, uint8_t *month, uint8_t *day,
     uint8_t *zone_hour, uint8_t *zone_min
@@ -914,6 +890,294 @@ static void test_parse_sentence_zda(void) {
 }
 #endif
 
+/// Consume a sentence and check its checksum.
+bool gpsutil_parse_sentence_unused(
+    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len
+) {
+    consume_until_checksum(&checksum, &cursor, buffer, buffer_len);
+    return check_checksum(checksum, cursor, buffer, buffer_len);
+}
+
+static void determine_time_validity(struct  gps_status *gps_status) {
+    // XXX: This is a bit of a hack, but it works for now
+    gps_status->gps_time_valid = (
+        gps_status->utc_year > 1000
+    );
+}
+
+/// Returns whether the current sentence is used
+/// Currently, we care about the following sentences:
+/// - GGA: type = 0
+/// - GLL: type = 1
+/// - RMC: type = 2
+/// - ZDA: type = 3
+static bool parse_sentence(struct gps_status *gps_status) {
+    // XOR everything until the asterisk
+    // Always check the validity before committing to the `gps_status` struct
+    uint8_t checksum = 0;
+    uint8_t cursor = 0;
+    const char *buffer = gps_status->buffer;
+    const uint32_t buffer_len = gps_status->buffer_pos;
+    // At least six characters
+    if (buffer_len < 6) {
+        return false;
+    }
+    // The first two don't matter
+    checksum ^= buffer[cursor++];
+    checksum ^= buffer[cursor++];
+    char type0, type1, type2, type;
+    checksum ^= (type0 = buffer[cursor++]);
+    checksum ^= (type1 = buffer[cursor++]);
+    checksum ^= (type2 = buffer[cursor++]);
+    // Check the type
+    if (type0 == 'G' && type1 == 'G' && type2 == 'A') {
+        type = 0;
+    } else if (type0 == 'G' && type1 == 'L' && type2 == 'L') {
+        type = 1;
+    } else if (type0 == 'R' && type1 == 'M' && type2 == 'C') {
+        type = 2;
+    } else if (type0 == 'Z' && type1 == 'D' && type2 == 'A') {
+        type = 3;
+    } else {
+        // Return true as long as the checksum is correct
+        return gpsutil_parse_sentence_unused(checksum, cursor, buffer, buffer_len);
+    }
+    char c;
+    COMMA_OR_FAIL(cursor);
+    switch (type) {
+        case 0:
+        {
+            uint8_t hour, min;
+            float sec;
+            float lat, lon;
+            uint8_t fix_quality;
+            uint8_t num_satellites;
+            float hdop;
+            float altitude;
+            float geoid_sep;
+            bool result = gpsutil_parse_sentence_gga(
+                checksum, cursor, buffer, buffer_len,
+                &hour, &min, &sec, &lat, &lon, &fix_quality, &num_satellites,
+                &hdop, &altitude, &geoid_sep);
+            if (result) {
+                gps_status->gps_lat = lat;
+                gps_status->gps_lon = lon;
+                gps_status->gps_valid = fix_quality > 0;
+                gps_status->gps_alt = altitude;
+                gps_status->gps_sat_num = num_satellites;
+                gps_status->utc_hour = hour;
+                gps_status->utc_min = min;
+                gps_status->utc_sec = sec;
+                determine_time_validity(gps_status);
+            }
+            return result;
+        }
+        case 1:
+        {
+            uint8_t hour, min;
+            float sec;
+            float lat, lon;
+            bool valid;
+            bool result = gpsutil_parse_sentence_gll(
+                checksum, cursor, buffer, buffer_len,
+                &hour, &min, &sec, &lat, &lon, &valid);
+            if (result) {
+                gps_status->gps_lat = lat;
+                gps_status->gps_lon = lon;
+                gps_status->gps_valid = valid;
+                gps_status->utc_hour = hour;
+                gps_status->utc_min = min;
+                gps_status->utc_sec = sec;
+                determine_time_validity(gps_status);
+            }
+            return result;
+        }
+        case 2:
+        {
+            uint8_t hour, min;
+            float sec;
+            float lat, lon;
+            bool valid;
+            bool result = gpsutil_parse_sentence_rmc(
+                checksum, cursor, buffer, buffer_len,
+                &hour, &min, &sec, &lat, &lon, &valid);
+            if (result) {
+                gps_status->gps_valid = valid;
+                gps_status->gps_lat = lat;
+                gps_status->gps_lon = lon;
+                gps_status->utc_hour = hour;
+                gps_status->utc_min = min;
+                gps_status->utc_sec = sec;
+                determine_time_validity(gps_status);
+            }
+            return result;
+        }
+        case 3:
+        {
+            // XXX: make use of TZ in ZDA
+            uint8_t hour, min;
+            float sec;
+            uint16_t year;
+            uint8_t month, day;
+            uint8_t zone_hour, zone_min;
+            bool result = gpsutil_parse_sentence_zda(
+                checksum, cursor, buffer, buffer_len,
+                &hour, &min, &sec, &year, &month, &day, &zone_hour, &zone_min);
+            if (result) {
+                gps_status->utc_hour = hour;
+                gps_status->utc_min = min;
+                gps_status->utc_sec = sec;
+                gps_status->utc_year = year;
+                gps_status->utc_month = month;
+                gps_status->utc_day = day;
+                determine_time_validity(gps_status);
+            }
+            return result;
+        }
+        default:
+            // unreachable
+            return false;
+    }
+}
+
+#ifdef GPS_UTIL_TEST
+// Test that the sentences are dispatched correctly
+void test_parse_sentence(void) {
+    struct gps_status gps_status = GPS_STATUS_INIT;
+    // Test GGA
+    char sentence[] = "GNGGA,121613.000,2455.2122,N,6532.8547,E,1,05,3.3,-1.0,M,0.0,M,,*64";
+    strcpy(gps_status.buffer, sentence);
+    gps_status.buffer_pos = strlen(sentence);
+    assert(parse_sentence(&gps_status));
+    assert_eq(gps_status.utc_hour, 12);
+    assert_eq(gps_status.utc_min, 16);
+    assert_float_eq(gps_status.utc_sec, 13.0);
+    assert_float_eq(gps_status.gps_lat, 24.920203);
+    assert_float_eq(gps_status.gps_lon, 65.547578);
+    assert_float_eq(gps_status.gps_alt, -1.0);
+    // GGA does not carry validity
+    // Test GLL
+    char sentence2[] = "GNGLL,4922.1031,N,10022.1234,W,002434.000,A,A*5F";
+    strcpy(gps_status.buffer, sentence2);
+    gps_status.buffer_pos = strlen(sentence2);
+    assert(parse_sentence(&gps_status));
+    assert_eq(gps_status.utc_hour, 0);
+    assert_eq(gps_status.utc_min, 24);
+    assert_float_eq(gps_status.utc_sec, 34.0);
+    assert_float_eq(gps_status.gps_lat, 49.368385);
+    assert_float_eq(gps_status.gps_lon, -100.368723);
+    assert(gps_status.gps_valid);
+    // Test RMC
+    char sentence3[] = "GNRMC,001313.000,A,3740.0000,N,12223.0000,W,0.00,0.00,290123,,,A*69";
+    strcpy(gps_status.buffer, sentence3);
+    gps_status.buffer_pos = strlen(sentence3);
+    assert(parse_sentence(&gps_status));
+    assert_eq(gps_status.utc_hour, 0);
+    assert_eq(gps_status.utc_min, 13);
+    assert_float_eq(gps_status.utc_sec, 13.0);
+    assert_float_eq(gps_status.gps_lat, 37.666667);
+    assert_float_eq(gps_status.gps_lon, -122.383333);   
+    // Test ZDA
+    char sentence4[] = "GNZDA,060618.133,23,02,2023,00,00*40";
+    strcpy(gps_status.buffer, sentence4);
+    gps_status.buffer_pos = strlen(sentence4);
+    assert(parse_sentence(&gps_status));
+    assert_eq(gps_status.utc_hour, 6);
+    assert_eq(gps_status.utc_min, 6);
+    assert_float_eq(gps_status.utc_sec, 18.133);
+    assert_eq(gps_status.utc_year, 2023);
+    assert_eq(gps_status.utc_month, 2);
+    assert_eq(gps_status.utc_day, 23);
+    assert(gps_status.gps_time_valid);
+}
+#endif
+
+/// Feed a character to the parser, returns true if a sentence is parsed successfully
+bool gpsutil_feed(struct gps_status *gps_status, int c) {
+    if (c == '$') {
+        // Start of a sentence
+        gps_status->in_sentence = true;
+        gps_status->buffer_pos = 0;
+        return false;
+    }
+    if (!gps_status->in_sentence) {
+        // Then nothing matters
+        return false;
+    }
+    if (c == '\r' || c == '\n') {
+        gps_status->in_sentence = false;
+        if (gps_status->buffer_pos > 0) {
+            gps_status->buffer[gps_status->buffer_pos] = '\0';
+            bool result = parse_sentence(gps_status);
+#ifndef NDEBUG
+            if (!result) {
+                printf("Bad sentence: %s\n", gps_status->buffer);
+            } else {
+                printf("GPS parsed: %s\n", gps_status->buffer);
+            }
+#endif
+            return result;
+        }
+    // Check for buffer overflow
+    } else if (gps_status->buffer_pos < sizeof(gps_status->buffer) - 1) {
+        gps_status->buffer[gps_status->buffer_pos++] = c;
+    } else {
+        // Buffer overflow
+        printf("GPS buffer overflow\n");
+        gps_status->in_sentence = false;
+    }
+    return false;
+}
+
+#ifdef GPS_UTIL_TEST
+void test_gpsutil_feed(void) {
+    struct gps_status gps_status = GPS_STATUS_INIT;
+    // Just test six short sentences
+    char source[] = "$GNZDA,,,,,,*56\r\n"
+    "$GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62\r\n"
+    "$GNZDA,,,,,,*56\r\n"
+    "$GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62\r\n"
+    "$GNZDA,,,,,,*56\r\n"
+    "$GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62\r\n";
+
+    for (size_t i = 0; i < strlen(source); ++i) {
+        gpsutil_feed(&gps_status, source[i]);
+    }
+
+    assert_float_eq(gps_status.gps_lat, -37.860833);
+    assert_float_eq(gps_status.gps_lon, 145.122667);
+}
+#endif
+
+/// Get the current time in UTC
+bool gpsutil_get_time(struct gps_status *gps_status, time_t *t) {
+    if (!gps_status->gps_time_valid) {
+        return false;
+    }
+    struct tm intermediate;
+    intermediate.tm_year = gps_status->utc_year + 100;
+    intermediate.tm_mon = gps_status->utc_month - 1;
+    intermediate.tm_mday = gps_status->utc_day;
+    intermediate.tm_hour = gps_status->utc_hour;
+    intermediate.tm_min = gps_status->utc_min;
+    intermediate.tm_sec = (int)gps_status->utc_sec;
+    intermediate.tm_isdst = -1;
+    // `mktime` ignores `wday` and `yday` which we don't have
+    *t = mktime(&intermediate);
+    return true;
+}
+
+/// Get the current GPS position
+bool gpsutil_get_location(struct gps_status *gps_status, float *lat, float *lon, float *alt) {
+    if (!gps_status->gps_valid) {
+        return false;
+    }
+    *lat = gps_status->gps_lat;
+    *lon = gps_status->gps_lon;
+    *alt = gps_status->gps_alt;
+    return true;
+}
+
 #ifdef GPS_UTIL_TEST
 int main(void) {
     test_parse_integer();
@@ -926,6 +1190,8 @@ int main(void) {
     test_parse_sentence_gll();
     test_parse_sentence_rmc();
     test_parse_sentence_zda();
+    test_parse_sentence();
+    test_gpsutil_feed();
     printf("All tests passed\n");
     return 0;
 }

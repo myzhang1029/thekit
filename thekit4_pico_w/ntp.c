@@ -41,6 +41,9 @@ static const uint32_t NTP_DELTA = 2208988800;
 // Time to wait in case UDP requests are lost
 static const uint32_t UDP_TIMEOUT_TIME_MS = 10 * 1000;
 
+// Our current position in the stratum system
+uint8_t ntp_stratum = 16;
+
 /// Close this request
 static void ntp_req_close(struct ntp_client_current_request *req) {
     if (!req)
@@ -59,26 +62,25 @@ static void ntp_req_close(struct ntp_client_current_request *req) {
     req->in_progress = false;
 }
 
-static void ntp_update_rtc(time_t *result) {
-    if (result) {
-        time_t lresult = *result + TZ_DIFF_SEC;
-        struct tm *lt = gmtime(&lresult);
-        datetime_t dt = {
-            .year  = lt->tm_year + 1900,
-            .month = lt->tm_mon + 1,
-            .day = lt->tm_mday,
-            .dotw = lt->tm_wday,
-            .hour = lt->tm_hour,
-            .min = lt->tm_min,
-            .sec = lt->tm_sec
-        };
-        printf("Got NTP response: %04d-%02d-%02d %02d:%02d:%02d\n",
-               dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
-        if (rtc_set_datetime(&dt)) {
-            puts("RTC set");
-            // Note that `light_register_next_alarm` modifies `dt` so make sure we don't need it anymore
-            light_register_next_alarm(&dt);
-        }
+static void ntp_update_rtc(time_t result, uint8_t stratum) {
+    time_t lresult = result + TZ_DIFF_SEC;
+    struct tm *lt = gmtime(&lresult);
+    datetime_t dt = {
+        .year  = lt->tm_year + 1900,
+        .month = lt->tm_mon + 1,
+        .day = lt->tm_mday,
+        .dotw = lt->tm_wday,
+        .hour = lt->tm_hour,
+        .min = lt->tm_min,
+        .sec = lt->tm_sec
+    };
+    printf("Got NTP response: %04d-%02d-%02d %02d:%02d:%02d\n",
+           dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
+    if (rtc_set_datetime(&dt)) {
+        puts("RTC set");
+        // Note that `light_register_next_alarm` modifies `dt` so make sure we don't need it anymore
+        light_register_next_alarm(&dt);
+        ntp_stratum = stratum + 1;
     }
 }
 
@@ -105,7 +107,7 @@ static void ntp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip
         uint32_t seconds_since_1900 = seconds_buf[0] << 24 | seconds_buf[1] << 16 | seconds_buf[2] << 8 | seconds_buf[3];
         uint32_t seconds_since_1970 = seconds_since_1900 - NTP_DELTA;
         time_t epoch = seconds_since_1970;
-        ntp_update_rtc(&epoch);
+        ntp_update_rtc(epoch, stratum);
     } else {
         puts("Invalid NTP response");
     }
@@ -166,6 +168,7 @@ void ntp_client_check_run(struct ntp_client *state) {
                 light_register_next_alarm(&dt);
             }
             state->next_sync_time = make_timeout_time_ms(NTP_INTERVAL_MS);
+            ntp_stratum = 1;
             return;
         }
 #endif

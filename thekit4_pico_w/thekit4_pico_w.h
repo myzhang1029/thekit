@@ -92,29 +92,5 @@ bool gps_get_time(datetime_t *dt);
 bool gps_get_location(float *lat, float *lon, float *alt);
 uint8_t gps_get_sat_num(void);
 void gps_parse_available(void);
-bool gpsutil_parse_sentence_gga(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
-    uint8_t *hour, uint8_t *min, float *sec,
-    float *lat, float *lon,
-    uint8_t *fix_quality, uint8_t *num_satellites,
-    float *hdop, float *altitude, float *geoid_sep
-);
-bool gpsutil_parse_sentence_gll(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
-    uint8_t *hour, uint8_t *min, float *sec,
-    float *lat, float *lon, bool *valid, bool *included_time
-);
-bool gpsutil_parse_sentence_rmc(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
-    uint8_t *hour, uint8_t *min, float *sec,
-    float *lat, float *lon, bool *valid
-);
-bool gpsutil_parse_sentence_zda(
-    uint8_t checksum, uint32_t cursor, char *buffer, uint32_t buffer_len,
-    uint8_t *hour, uint8_t *min, float *sec,
-    uint16_t *year, uint8_t *month, uint8_t *day,
-    uint8_t *zone_hour, uint8_t *zone_min
-);
-
 
 #endif
