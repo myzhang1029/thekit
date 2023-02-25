@@ -112,6 +112,8 @@ int main() {
 #if PICO_CYW43_ARCH_POLL
         if (has_cyw43)
             cyw43_arch_poll();
+#endif
+#if ENABLE_GPS || PICO_CYW43_ARCH_POLL
         sleep_ms(1);
 #else
         sleep_ms(100);
