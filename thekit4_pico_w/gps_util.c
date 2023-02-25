@@ -21,7 +21,6 @@
 #include "gps_util.h"
 
 #include <ctype.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,109 +28,134 @@
 
 #ifdef GPS_UTIL_TEST
 #include <assert.h>
+#include <math.h>
 #include <string.h>
 #define assert_eq(a, b) assert((a) == (b))
 #define assert_float_eq(a, b) assert(fabs((a) - (b)) < 1e-5)
 #endif
 
+/// Lookup table for scaling floats
+static const float NEGPOW_10[] = {1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7};
+static const uint8_t NEGPOW_10_LEN = sizeof(NEGPOW_10) / sizeof(NEGPOW_10[0]);
+/// Lookup table for hexadecimals
+static const char HEX[] = "0123456789ABCDEF";
+
 // Everything returns false for invalid input
+// `uint8_t` is enough for the buffer length (NMEA-0183 max is 82 bytes and our
+// buffer is 128 bytes)
 
-/// Parse an unsigned integer
-static inline bool parse_integer(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, uint32_t *result) {
+/// Parse an unsigned integer and stop at the first non-digit character
+static inline uint32_t parse_integer(uint8_t *checksum, uint8_t *cursor, const char *buffer, const uint8_t buffer_len) {
     uint32_t value = 0;
-    char c;
+    uint8_t our_checksum = *checksum;
+    // Although we can otherwise compute the new cursor,
+    // having a new variable makes it faster (this is a hot path)
+    // and on most targets, we have enough registers to spare.
+    uint8_t our_cursor = *cursor;
+    // unsigned char: avoid unnecessary sign extension and UB in `isdigit`
+    uint8_t c;
+    const char *end = buffer + buffer_len;
+    buffer += *cursor;
 
-    while (*cursor < buffer_len && isdigit((unsigned char) buffer[*cursor])) {
-        *checksum ^= (c = buffer[(*cursor)++]);
-        value = value * 10 + (c - '0');
+    while (isdigit(c = *buffer) && buffer < end) {
+        value = value * 10 + c - '0';
+        our_checksum ^= c;
+        buffer++;
+        our_cursor++;
     }
 
-    *result = value;
-    return true;
+    *checksum = our_checksum;
+    *cursor = our_cursor;
+    return value;
 }
 
 #ifdef GPS_UTIL_TEST
 static void test_parse_integer(void) {
     uint8_t checksum = 0;
-    uint32_t cursor = 0;
+    uint8_t cursor = 0;
     uint32_t result;
     char buffer[] = "12345,";
-    uint32_t buffer_len = sizeof(buffer) - 1;
-    assert(parse_integer(&checksum, &cursor, buffer, buffer_len, &result));
+    uint8_t buffer_len = sizeof(buffer) - 1;
+    result = parse_integer(&checksum, &cursor, buffer, buffer_len);
     assert_eq(result, 12345);
     assert_eq(checksum, 49);
     assert_eq(cursor, 5);
     checksum = 0;
     cursor = 0;
     char buffer2[] = "123456";
-    uint32_t buffer2_len = sizeof(buffer2) - 1;
-    assert(parse_integer(&checksum, &cursor, buffer2, buffer2_len, &result));
+    uint8_t buffer2_len = sizeof(buffer2) - 1;
+    result = parse_integer(&checksum, &cursor, buffer2, buffer2_len);
     assert_eq(result, 123456);
     assert_eq(checksum, 7);
     assert_eq(cursor, 6);
 }
 #endif
 
-/// Parse a floating point number
-static inline bool parse_float(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, float *result) {
-    uint32_t integer_part = 0;
-    uint32_t decimal_part = 0;
-    uint32_t decimal_part_len = 0;
-    char c;
-    bool negative = false;
+/// Parse a floating point number from the decimal point
+static inline float parse_float_decimal(uint8_t *checksum, uint8_t *cursor, const char *buffer, const uint8_t buffer_len) {
+    const char *end = buffer + buffer_len;
+    buffer += *cursor;
+    // Return 0.0 if the first character is not a decimal point or the buffer is exhausted
+    if (buffer >= end || *buffer++ != '.') {
+        return 0.0;
+    }
+    uint8_t our_checksum = *checksum ^ '.';
+    uint32_t value = 0;
+    uint8_t digits = 0;
+    uint8_t c;
+    // The same logic as `parse_integer`, but stops when the number of digits exceeds the length of the lookup table
+    while (isdigit(c = *buffer) && buffer < end && digits < NEGPOW_10_LEN) {
+        value = value * 10 + c - '0';
+        our_checksum ^= c;
+        buffer++;
+        digits++;
+    }
+    *checksum = our_checksum;
+    *cursor += digits + 1;
+    // We can safely assume that the number of digits is less than the length of the lookup table
+    return value * NEGPOW_10[digits];
+}
 
+/// Parse a floating point number and stop at the first non-number character
+static inline float parse_float(uint8_t *checksum, uint8_t *cursor, const char *buffer, const uint8_t buffer_len) {
     if (buffer_len - *cursor >= 1) {
-        if ((c = buffer[*cursor]) == '-') {
-            *checksum ^= c;
-            negative = true;
+        bool negative = false;
+        if (buffer[*cursor] == '-') {
+            *checksum ^= '-';
             (*cursor)++;
+            negative = true;
         }
+        uint32_t integer_part = parse_integer(checksum, cursor, buffer, buffer_len);
+        float result = integer_part + parse_float_decimal(checksum, cursor, buffer, buffer_len);
+        return negative ? -result : result;
     }
-    if (!parse_integer(checksum, cursor, buffer, buffer_len, &integer_part)) {
-        return false;
-    }
-
-    if (*cursor < buffer_len && (c = buffer[*cursor]) == '.') {
-        *checksum ^= c;
-        (*cursor)++;
-        uint32_t decimal_part_cursor = *cursor;
-        if (!parse_integer(checksum, cursor, buffer, buffer_len, &decimal_part)) {
-            return false;
-        }
-        decimal_part_len = *cursor - decimal_part_cursor;
-    }
-
-    *result = integer_part + decimal_part * powf(10, -(float) decimal_part_len);
-    if (negative) {
-        *result = -*result;
-    }
-    return true;
+    return 0.0;
 }
 
 #ifdef GPS_UTIL_TEST
 static void test_parse_float(void) {
     uint8_t checksum = 0;
-    uint32_t cursor = 0;
+    uint8_t cursor = 0;
     float result;
     char buffer[] = "123.456789,";
-    uint32_t buffer_len = sizeof(buffer) - 1;
-    assert(parse_float(&checksum, &cursor, buffer, buffer_len, &result));
+    uint8_t buffer_len = sizeof(buffer) - 1;
+    result = parse_float(&checksum, &cursor, buffer, buffer_len);
     assert_float_eq(result, 123.456789);
     assert_eq(checksum, 31);
     assert_eq(cursor, 10);
     checksum = 0;
     cursor = 0;
     char buffer2[] = "123456";
-    uint32_t buffer2_len = sizeof(buffer2) - 1;
-    assert(parse_float(&checksum, &cursor, buffer2, buffer2_len, &result));
+    uint8_t buffer2_len = sizeof(buffer2) - 1;
+    result = parse_float(&checksum, &cursor, buffer2, buffer2_len);
     assert_float_eq(result, 123456);
     assert_eq(checksum, 7);
     assert_eq(cursor, 6);
     checksum = 0;
     cursor = 0;
     char buffer3[] = "-123456";
-    uint32_t buffer3_len = sizeof(buffer3) - 1;
-    assert(parse_float(&checksum, &cursor, buffer3, buffer3_len, &result));
+    uint8_t buffer3_len = sizeof(buffer3) - 1;
+    result = parse_float(&checksum, &cursor, buffer3, buffer3_len);
     assert_float_eq(result, -123456);
     assert_eq(checksum, 42);
     assert_eq(cursor, 7);
@@ -140,7 +164,7 @@ static void test_parse_float(void) {
 
 /// Take a single character.
 /// If the following character is a comma or an asterisk, return EOF and the cursor and the checksum are not modified.
-static inline int16_t parse_single_char(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len) {
+static inline int16_t parse_single_char(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len) {
     if (*cursor >= buffer_len) {
         return EOF;
     }
@@ -156,9 +180,9 @@ static inline int16_t parse_single_char(uint8_t *checksum, uint32_t *cursor, con
 #ifdef GPS_UTIL_TEST
 static void test_parse_single_char(void) {
     uint8_t checksum = 0;
-    uint32_t cursor = 0;
+    uint8_t cursor = 0;
     char buffer[] = "12345,";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     assert_eq(parse_single_char(&checksum, &cursor, buffer, buffer_len), '1');
     assert_eq(checksum, 49);
     assert_eq(cursor, 1);
@@ -181,46 +205,27 @@ static void test_parse_single_char(void) {
 #endif
 
 /// Parse a h?hmmss.?s* string.
-static bool parse_hms(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
-    uint32_t hms;
-    if (!parse_integer(checksum, cursor, buffer, buffer_len, &hms)) {
-        return false;
-    }
+static inline void parse_hms(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
+    uint32_t hms = parse_integer(checksum, cursor, buffer, buffer_len);
+    float sec_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
     uint8_t sec_int = hms % 100;
     hms /= 100;
     *min = hms % 100;
-    hms /= 100;
-    *hour = hms % 100;
-    uint16_t sec_frac = 0;
-    uint8_t sec_mag = 0;
-    char c;
-    // Look-ahead for fractional seconds
-    c = buffer[(*cursor)++];
-    if (c == '.') {
-        *checksum ^= c;
-        while (*cursor < buffer_len && isdigit((unsigned char) buffer[*cursor])) {
-            *checksum ^= (c = buffer[(*cursor)++]);
-            sec_frac = sec_frac * 10 + (c - '0');
-            sec_mag++;
-        }
-    } else {
-        (*cursor)--;
-    }
-    *sec = sec_int + sec_frac * powf(10, -(float) sec_mag);
-    return true;
+    *hour = hms / 100;
+    *sec = sec_int + sec_float;
 }
 
 #ifdef GPS_UTIL_TEST
 static void test_parse_hms(void) {
     uint8_t checksum = 0;
-    uint32_t cursor = 0;
+    uint8_t cursor = 0;
     uint8_t hour, min;
     float sec;
     char buffer[] = "123456.789";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     // Just to confirm my understanding of the length
     assert_eq(buffer_len, 10);
-    assert(parse_hms(&checksum, &cursor, buffer, buffer_len, &hour, &min, &sec));
+    parse_hms(&checksum, &cursor, buffer, buffer_len, &hour, &min, &sec);
     assert_eq(hour, 12);
     assert_eq(min, 34);
     assert_float_eq(sec, 56.789);
@@ -231,7 +236,7 @@ static void test_parse_hms(void) {
     cursor = 0;
     char buffer2[] = "32432.";
     uint8_t buffer2_len = sizeof(buffer2) - 1;
-    assert(parse_hms(&checksum, &cursor, buffer2, buffer2_len, &hour, &min, &sec));
+    parse_hms(&checksum, &cursor, buffer2, buffer2_len, &hour, &min, &sec);
     assert_eq(hour, 3);
     assert_eq(min, 24);
     assert_float_eq(sec, 32.0);
@@ -241,7 +246,7 @@ static void test_parse_hms(void) {
     cursor = 0;
     char buffer3[] = "132432";
     uint8_t buffer3_len = sizeof(buffer3) - 1;
-    assert(parse_hms(&checksum, &cursor, buffer3, buffer3_len, &hour, &min, &sec));
+    parse_hms(&checksum, &cursor, buffer3, buffer3_len, &hour, &min, &sec);
     assert_eq(hour, 13);
     assert_eq(min, 24);
     assert_float_eq(sec, 32.0);
@@ -251,44 +256,24 @@ static void test_parse_hms(void) {
 #endif
 
 /// Parse a d?d?dmm.?m* string.
-static bool parse_dm(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len, uint16_t *deg, float *min) {
-    uint32_t dms;
-    if (!parse_integer(checksum, cursor, buffer, buffer_len, &dms)) {
-        return false;
-    }
+static inline void parse_dm(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len, uint16_t *deg, float *min) {
+    uint32_t dms = parse_integer(checksum, cursor, buffer, buffer_len);
+    float min_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
     uint8_t min_int = dms % 100;
-    dms /= 100;
-    *deg = dms;
-    uint16_t min_frac = 0;
-    uint8_t min_mag = 0;
-    char c;
-    // Look-ahead for the decimal point
-    c = buffer[(*cursor)++];
-    if (c == '.') {
-        // Consume the decimal point
-        *checksum ^= c;
-        while (*cursor < buffer_len && isdigit((unsigned char) buffer[*cursor])) {
-            *checksum ^= (c = buffer[(*cursor)++]);
-            min_frac = min_frac * 10 + (c - '0');
-            min_mag++;
-        }
-    } else {
-        (*cursor)--;
-    }
-    *min = min_int + min_frac * powf(10, -(float) min_mag);
-    return true;
+    *deg = dms / 100;
+    *min = min_int + min_float;
 }
 
 #ifdef GPS_UTIL_TEST
 static void test_parse_dm(void) {
     uint8_t checksum = 0;
-    uint32_t cursor = 0;
+    uint8_t cursor = 0;
     uint16_t deg;
     float min;
     char buffer[] = "23456.789";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     assert_eq(buffer_len, 9);
-    assert(parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min));
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min);
     assert_eq(deg, 234);
     assert_float_eq(min, 56.789);
     assert_eq(checksum, 46);
@@ -297,7 +282,7 @@ static void test_parse_dm(void) {
     cursor = 0;
     char buffer2[] = "32432.";
     uint8_t buffer2_len = sizeof(buffer2) - 1;
-    assert(parse_dm(&checksum, &cursor, buffer2, buffer2_len, &deg, &min));
+    parse_dm(&checksum, &cursor, buffer2, buffer2_len, &deg, &min);
     assert_eq(deg, 324);
     assert_float_eq(min, 32.0);
     assert_eq(checksum, 26);
@@ -306,28 +291,24 @@ static void test_parse_dm(void) {
 #endif
 
 /// Parse the trailing '*hh' part of a NMEA sentence.
-static inline bool check_checksum(uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len) {
+static inline bool check_checksum(uint8_t checksum, uint8_t cursor, const char *buffer, uint8_t buffer_len) {
     if (cursor + 3 > buffer_len) {
         return false;
     }
     if (buffer[cursor++] != '*') {
         return false;
     }
-    static const char hex[] = "0123456789ABCDEF";
     char first = buffer[cursor++];
-    char second = buffer[cursor++];
-    char real_first = hex[checksum >> 4];
-    char real_second = hex[checksum & 0x0F];
-    if (first != real_first || second != real_second) {
-        return false;
-    }
-    return true;
+    char second = buffer[cursor];
+    char real_first = HEX[checksum >> 4];
+    char real_second = HEX[checksum & 0x0F];
+    return first == real_first && second == real_second;
 }
 
 #ifdef GPS_UTIL_TEST
 static void test_check_checksum(void) {
     char buffer[] = "*12";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     assert_eq(buffer_len, 3);
     assert(check_checksum(18, 0, buffer, buffer_len));
     assert(!check_checksum(20, 0, buffer, buffer_len));
@@ -338,7 +319,7 @@ static void test_check_checksum(void) {
 }
 #endif
 
-static inline void consume_until_checksum(uint8_t *checksum, uint32_t *cursor, const char *buffer, uint32_t buffer_len) {
+static inline void consume_until_checksum(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len) {
     while (*cursor < buffer_len) {
         char c = buffer[(*cursor)++];
         if (c == '*') {
@@ -350,30 +331,25 @@ static inline void consume_until_checksum(uint8_t *checksum, uint32_t *cursor, c
 }
 
 #define COMMA_OR_FAIL(cursor) do { \
-    checksum ^= (c = buffer[(cursor)++]); \
-    if (c != ',') { \
+    if (buffer[(cursor)++] != ',') { \
         return false; \
     } \
+    checksum ^= ','; \
 } while (0)
 
 bool gpsutil_parse_sentence_gga(
-    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint8_t cursor, const char *buffer, uint8_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     float *lat, float *lon,
     uint8_t *fix_quality, uint8_t *num_satellites,
     float *hdop, float *altitude, float *geoid_sep
 ) {
     // hhmmss.sss,dddmm.mmmmm,[NS],dddmm.mmmmm,[EW],FIX,NSAT,HDOP,ALT,M,MSL,M,AGE,STID
-    if (!parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec)) {
-        return false;
-    }
-    char c;
+    parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec);
     COMMA_OR_FAIL(cursor);
     uint16_t deg;
     float min_parser;
-    if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
-        return false;
-    }
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
     *lat = (float)deg + min_parser / 60.0;
     COMMA_OR_FAIL(cursor);
     int16_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
@@ -388,9 +364,7 @@ bool gpsutil_parse_sentence_gga(
         return false;
     }
     COMMA_OR_FAIL(cursor);
-    if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
-        return false;
-    }
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
     *lon = (float)deg + min_parser / 60.0;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
@@ -405,25 +379,13 @@ bool gpsutil_parse_sentence_gga(
         return false;
     }
     COMMA_OR_FAIL(cursor);
-    uint32_t fix_quality_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &fix_quality_int)) {
-        return false;
-    }
-    *fix_quality = fix_quality_int;
+    *fix_quality = parse_integer(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    uint32_t num_satellites_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &num_satellites_int)) {
-        return false;
-    }
-    *num_satellites = num_satellites_int;
+    *num_satellites = parse_integer(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    if (!parse_float(&checksum, &cursor, buffer, buffer_len, hdop)) {
-        return false;
-    }
+    *hdop = parse_float(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    if (!parse_float(&checksum, &cursor, buffer, buffer_len, altitude)) {
-        return false;
-    }
+    *altitude = parse_float(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'M') {
@@ -435,9 +397,7 @@ bool gpsutil_parse_sentence_gga(
         return false;
     }
     COMMA_OR_FAIL(cursor);
-    if (!parse_float(&checksum, &cursor, buffer, buffer_len, geoid_sep)) {
-        return false;
-    }
+    *geoid_sep = parse_float(&checksum, &cursor, buffer, buffer_len);
     // The rest we don't care about
     consume_until_checksum(&checksum, &cursor, buffer, buffer_len);
     return check_checksum(checksum, cursor, buffer, buffer_len);
@@ -457,10 +417,10 @@ static void test_parse_sentence_gga(void) {
     float geoid_sep;
     uint8_t checksum = 0;
     char buffer[] = "GPGGA,161229.487,3723.2475,N,12158.3416,W,1,07,1.0,9.0,M,1.0,M,1,0000*4B";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     assert_eq(buffer_len, 72);
-    uint32_t cursor = 6;
-    for (uint32_t i = 0; i < cursor; i++) {
+    uint8_t cursor = 6;
+    for (uint8_t i = 0; i < cursor; i++) {
         checksum ^= buffer[i];
     }
     assert(gpsutil_parse_sentence_gga(
@@ -479,10 +439,10 @@ static void test_parse_sentence_gga(void) {
     assert_float_eq(altitude, 9.0);
     checksum = 0;
     char buffer2[] = "GNGGA,121613.000,2455.2122,N,6532.8547,E,1,05,3.3,-1.0,M,0.0,M,,*64";
-    uint32_t buffer2_len = sizeof(buffer2) - 1;
+    uint8_t buffer2_len = sizeof(buffer2) - 1;
     assert_eq(buffer2_len, 67);
-    uint32_t cursor2 = 6;
-    for (uint32_t i = 0; i < cursor2; i++) {
+    uint8_t cursor2 = 6;
+    for (uint8_t i = 0; i < cursor2; i++) {
         checksum ^= buffer2[i];
     }
     assert(gpsutil_parse_sentence_gga(
@@ -502,10 +462,10 @@ static void test_parse_sentence_gga(void) {
     checksum = 0;
     // Minimum example
     char buffer3[] = "GNGGA,,,,,,0,00,25.5,,,,,,*64";
-    uint32_t buffer3_len = sizeof(buffer3) - 1;
+    uint8_t buffer3_len = sizeof(buffer3) - 1;
     assert_eq(buffer3_len, 29);
-    uint32_t cursor3 = 6;
-    for (uint32_t i = 0; i < cursor3; i++) {
+    uint8_t cursor3 = 6;
+    for (uint8_t i = 0; i < cursor3; i++) {
         checksum ^= buffer3[i];
     }
     assert(gpsutil_parse_sentence_gga(
@@ -526,18 +486,15 @@ static void test_parse_sentence_gga(void) {
 #endif
 
 bool gpsutil_parse_sentence_gll(
-    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint8_t cursor, const char *buffer, uint8_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     float *lat, float *lon, bool *valid
 ) {
     // dddmm.mmmmm, [NS], dddmm.mmmmm, [EW], hhmmss.ss, [AV], ...
     uint16_t deg;
     float min_parser;
-    if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
-        return false;
-    }
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
     *lat = (float)deg + min_parser / 60.0;
-    char c;
     COMMA_OR_FAIL(cursor);
     int16_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'S') {
@@ -551,9 +508,7 @@ bool gpsutil_parse_sentence_gll(
         return false;
     }
     COMMA_OR_FAIL(cursor);
-    if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
-        return false;
-    }
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
     *lon = (float)deg + min_parser / 60.0;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
@@ -568,9 +523,7 @@ bool gpsutil_parse_sentence_gll(
         return false;
     }
     COMMA_OR_FAIL(cursor);
-    if (!parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec)) {
-        return false;
-    }
+    parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec);
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'A') {
@@ -599,10 +552,10 @@ static void test_parse_sentence_gll(void) {
     float lon;
     bool valid;
     char buffer2[] = "GNGLL,4922.1031,N,10022.1234,W,002434.000,A,A*5F";
-    uint32_t buffer2_len = sizeof(buffer2) - 1;
+    uint8_t buffer2_len = sizeof(buffer2) - 1;
     assert_eq(buffer2_len, 48);
-    uint32_t cursor2 = 6;
-    for (uint32_t i = 0; i < cursor2; i++) {
+    uint8_t cursor2 = 6;
+    for (uint8_t i = 0; i < cursor2; i++) {
         checksum ^= buffer2[i];
     }
     assert(gpsutil_parse_sentence_gll(
@@ -618,10 +571,10 @@ static void test_parse_sentence_gll(void) {
     // Minimum example
     checksum = 0;
     char buffer3[] = "GNGLL,,,,,,V,N*7A";
-    uint32_t buffer3_len = sizeof(buffer3) - 1;
+    uint8_t buffer3_len = sizeof(buffer3) - 1;
     assert_eq(buffer3_len, 17);
-    uint32_t cursor3 = 6;
-    for (uint32_t i = 0; i < cursor3; i++) {
+    uint8_t cursor3 = 6;
+    for (uint8_t i = 0; i < cursor3; i++) {
         checksum ^= buffer3[i];
     }
     assert(gpsutil_parse_sentence_gll(
@@ -638,16 +591,13 @@ static void test_parse_sentence_gll(void) {
 
 #endif
 bool gpsutil_parse_sentence_rmc(
-    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint8_t cursor, const char *buffer, uint8_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     float *lat, float *lon, bool *valid
 ) {
     // XXX: Currently only used to retrieve lat, lon, and time
     // hhmmss.ss, [AV], ddmm.mmmmm, [NS], dddmm.mmmmm, [EW], sss.s, ddd.d, ddMMyy, [E/W]
-    if (!parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec)) {
-        return false;
-    }
-    char c;
+    parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec);
     COMMA_OR_FAIL(cursor);
     // Valid
     int16_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
@@ -666,9 +616,7 @@ bool gpsutil_parse_sentence_rmc(
     // Latitude
     uint16_t deg;
     float min_parser;
-    if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
-        return false;
-    }
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
     *lat = (float)deg + min_parser / 60.0;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
@@ -684,9 +632,7 @@ bool gpsutil_parse_sentence_rmc(
     }
     COMMA_OR_FAIL(cursor);
     // Longitude
-    if (!parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser)) {
-        return false;
-    }
+    parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
     *lon = (float)deg + min_parser / 60.0;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
@@ -715,10 +661,10 @@ static void test_parse_sentence_rmc(void) {
     float lon;
     bool valid;
     char buffer[] = "GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     assert_eq(buffer_len, 65);
-    uint32_t cursor = 6;
-    for (uint32_t i = 0; i < cursor; i++) {
+    uint8_t cursor = 6;
+    for (uint8_t i = 0; i < cursor; i++) {
         checksum ^= buffer[i];
     }
     assert(gpsutil_parse_sentence_rmc(
@@ -733,10 +679,10 @@ static void test_parse_sentence_rmc(void) {
     assert(valid);
     checksum = 0;
     char buffer2[] = "GNRMC,001313.000,A,3740.0000,N,12223.0000,W,0.00,0.00,290123,,,A*69";
-    uint32_t buffer2_len = sizeof(buffer2) - 1;
+    uint8_t buffer2_len = sizeof(buffer2) - 1;
     assert_eq(buffer2_len, 67);
-    uint32_t cursor2 = 6;
-    for (uint32_t i = 0; i < cursor2; i++) {
+    uint8_t cursor2 = 6;
+    for (uint8_t i = 0; i < cursor2; i++) {
         checksum ^= buffer2[i];
     }
     assert(gpsutil_parse_sentence_rmc(
@@ -752,10 +698,10 @@ static void test_parse_sentence_rmc(void) {
     // Minimum example
     checksum = 0;
     char buffer3[] = "GNRMC,,V,,,,,,,,,,M*4E";
-    uint32_t buffer3_len = sizeof(buffer3) - 1;
+    uint8_t buffer3_len = sizeof(buffer3) - 1;
     assert_eq(buffer3_len, 22);
-    uint32_t cursor3 = 6;
-    for (uint32_t i = 0; i < cursor3; i++) {
+    uint8_t cursor3 = 6;
+    for (uint8_t i = 0; i < cursor3; i++) {
         checksum ^= buffer3[i];
     }
     assert(gpsutil_parse_sentence_rmc(
@@ -772,46 +718,23 @@ static void test_parse_sentence_rmc(void) {
 #endif
 
 bool gpsutil_parse_sentence_zda(
-    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len,
+    uint8_t checksum, uint8_t cursor, const char *buffer, uint8_t buffer_len,
     uint8_t *hour, uint8_t *min, float *sec,
     uint16_t *year, uint8_t *month, uint8_t *day,
     uint8_t *zone_hour, uint8_t *zone_min
 ) {
     // hhmmss.sss,dd,mm,yyyy,zh,zm
-    if (!parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec)) {
-        return false;
-    }
-    char c;
+    parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec);
     COMMA_OR_FAIL(cursor);
-    uint32_t day_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &day_int)) {
-        return false;
-    }
-    *day = day_int;
+    *day = parse_integer(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    uint32_t month_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &month_int)) {
-        return false;
-    }
-    *month = month_int;
+    *month = parse_integer(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    uint32_t year_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &year_int)) {
-        return false;
-    }
-    *year = year_int;
+    *year = parse_integer(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    uint32_t zone_hour_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &zone_hour_int)) {
-        return false;
-    }
-    *zone_hour = zone_hour_int;
+    *zone_hour = parse_integer(&checksum, &cursor, buffer, buffer_len);
     COMMA_OR_FAIL(cursor);
-    uint32_t zone_min_int;
-    if (!parse_integer(&checksum, &cursor, buffer, buffer_len, &zone_min_int)) {
-        return false;
-    }
-    *zone_min = zone_min_int;
+    *zone_min = parse_integer(&checksum, &cursor, buffer, buffer_len);
     return check_checksum(checksum, cursor, buffer, buffer_len);
 }
 
@@ -828,10 +751,10 @@ static void test_parse_sentence_zda(void) {
     uint8_t zone_min;
     // A real example
     char buffer[] = "GNZDA,001313.000,29,01,2023,00,00*41";
-    uint32_t buffer_len = sizeof(buffer) - 1;
+    uint8_t buffer_len = sizeof(buffer) - 1;
     assert_eq(buffer_len, 36);
-    uint32_t cursor = 6;
-    for (uint32_t i = 0; i < cursor; i++) {
+    uint8_t cursor = 6;
+    for (uint8_t i = 0; i < cursor; i++) {
         checksum ^= buffer[i];
     }
     assert(gpsutil_parse_sentence_zda(
@@ -848,10 +771,10 @@ static void test_parse_sentence_zda(void) {
     assert_eq(zone_min, 0);
     checksum = 0;
     char buffer2[] = "GNZDA,060618.133,23,02,2023,00,00*40";
-    uint32_t buffer2_len = sizeof(buffer2) - 1;
+    uint8_t buffer2_len = sizeof(buffer2) - 1;
     assert_eq(buffer2_len, 36);
-    uint32_t cursor2 = 6;
-    for (uint32_t i = 0; i < cursor2; i++) {
+    uint8_t cursor2 = 6;
+    for (uint8_t i = 0; i < cursor2; i++) {
         checksum ^= buffer2[i];
     }
     assert(gpsutil_parse_sentence_zda(
@@ -869,10 +792,10 @@ static void test_parse_sentence_zda(void) {
     // Minimum example
     checksum = 0;
     char buffer3[] = "GNZDA,,,,,,*56";
-    uint32_t buffer3_len = sizeof(buffer3) - 1;
+    uint8_t buffer3_len = sizeof(buffer3) - 1;
     assert_eq(buffer3_len, 14);
-    uint32_t cursor3 = 6;
-    for (uint32_t i = 0; i < cursor3; i++) {
+    uint8_t cursor3 = 6;
+    for (uint8_t i = 0; i < cursor3; i++) {
         checksum ^= buffer3[i];
     }
     assert(gpsutil_parse_sentence_zda(
@@ -892,7 +815,7 @@ static void test_parse_sentence_zda(void) {
 
 /// Consume a sentence and check its checksum.
 bool gpsutil_parse_sentence_unused(
-    uint8_t checksum, uint32_t cursor, const char *buffer, uint32_t buffer_len
+    uint8_t checksum, uint8_t cursor, const char *buffer, uint8_t buffer_len
 ) {
     consume_until_checksum(&checksum, &cursor, buffer, buffer_len);
     return check_checksum(checksum, cursor, buffer, buffer_len);
@@ -917,7 +840,7 @@ static bool parse_sentence(struct gps_status *gps_status) {
     uint8_t checksum = 0;
     uint8_t cursor = 0;
     const char *buffer = gps_status->buffer;
-    const uint32_t buffer_len = gps_status->buffer_pos;
+    const uint8_t buffer_len = gps_status->buffer_pos;
     // At least six characters
     if (buffer_len < 6) {
         return false;
@@ -942,7 +865,6 @@ static bool parse_sentence(struct gps_status *gps_status) {
         // Return true as long as the checksum is correct
         return gpsutil_parse_sentence_unused(checksum, cursor, buffer, buffer_len);
     }
-    char c;
     COMMA_OR_FAIL(cursor);
     switch (type) {
         case 0:
