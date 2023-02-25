@@ -32,6 +32,7 @@
 // Definitions
 static const uint LIGHT_PIN = 3;
 static const uint BUTTON1_PIN = 18;
+#define BUTTON1_EDGE_TYPE GPIO_IRQ_EDGE_FALL
 // Magic. TODO: Try to reach 1MHz at PWM?
 static const float clockdiv = 1.;
 // Max duty
@@ -105,6 +106,9 @@ static const uint GPS_RX_PIN = 13;
 static const uint GPS_EN_PIN = 14;
 static const uint GPS_PPS_PIN = 15;
 static const uint GPS_BAUD = 9600;
+#define PPS_EDGE_TYPE GPIO_IRQ_EDGE_RISE
+// in microseconds
+#define NTP_GPS_REJECTION_THRESHOLD 2000000
 #endif
 
 // Networking-related

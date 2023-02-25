@@ -47,7 +47,7 @@ static void light_off(void) {
 
 // For gpio irq
 static void light_toggle(uint gpio, uint32_t events) {
-    if (gpio != BUTTON1_PIN)
+    if (gpio != BUTTON1_PIN || !(events & BUTTON1_EDGE_TYPE))
         return;
     // Debounce
     uint32_t irq_timestamp = time_us_32();
@@ -62,7 +62,7 @@ static void light_toggle(uint gpio, uint32_t events) {
 void light_init(void) {
     // IO
     gpio_set_function(LIGHT_PIN, GPIO_FUNC_PWM);
-    gpio_set_irq_enabled_with_callback(BUTTON1_PIN, GPIO_IRQ_EDGE_FALL, true, light_toggle);
+    gpio_set_irq_enabled_with_callback(BUTTON1_PIN, BUTTON1_EDGE_TYPE, true, light_toggle);
     gpio_pull_up(BUTTON1_PIN);
 
     // PWM
@@ -176,6 +176,14 @@ void light_register_next_alarm(datetime_t *current) {
     // We past the last one. Register the first alarm after incrementing `day`
     next_day(current);
     do_register_alarm(current, 0);
+}
+
+/// Convenient function to update the rtc and register the next alarm
+/// Note that `light_register_next_alarm` modifies `dt` so make sure we don't need it anymore
+bool light_update_rtc_and_register_next_alarm(datetime_t *current) {
+    bool result = rtc_set_datetime(current);
+    light_register_next_alarm(current);
+    return result;
 }
 
 #endif

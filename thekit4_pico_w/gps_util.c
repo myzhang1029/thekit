@@ -40,8 +40,10 @@
 
 #ifdef __GNUC__
 #define unlikely(x) __builtin_expect((x), 0)
+#define mem_barrier() __sync_synchronize()
 #else
 #define unlikely(x) (x)
+#define mem_barrier() __asm__ volatile("" ::: "memory")
 #endif
 
 /// Lookup table for scaling floats
@@ -932,6 +934,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_min = min;
                 gps_status->utc_sec = sec;
                 determine_time_validity(gps_status);
+                // Try to make sure we write to the update timestamp last
+                mem_barrier();
                 gps_status->last_position_update = now;
                 gps_status->last_time_update = now;
             }
@@ -954,6 +958,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_min = min;
                 gps_status->utc_sec = sec;
                 determine_time_validity(gps_status);
+                // Try to make sure we write to the update timestamp last
+                mem_barrier();
                 gps_status->last_position_update = now;
                 gps_status->last_time_update = now;
             }
@@ -976,6 +982,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_min = min;
                 gps_status->utc_sec = sec;
                 determine_time_validity(gps_status);
+                // Try to make sure we write to the update timestamp last
+                mem_barrier();
                 gps_status->last_position_update = now;
                 gps_status->last_time_update = now;
             }
@@ -1000,6 +1008,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_month = month;
                 gps_status->utc_day = day;
                 determine_time_validity(gps_status);
+                // Try to make sure we write to the update timestamp last
+                mem_barrier();
                 gps_status->last_time_update = now;
             }
             return result;
@@ -1125,7 +1135,7 @@ bool gpsutil_get_time(const struct gps_status *gps_status, time_t *t, timestamp_
         return false;
     }
     struct tm intermediate;
-    intermediate.tm_year = gps_status->utc_year + 100;
+    intermediate.tm_year = gps_status->utc_year - 1900;
     intermediate.tm_mon = gps_status->utc_month - 1;
     intermediate.tm_mday = gps_status->utc_day;
     intermediate.tm_hour = gps_status->utc_hour;

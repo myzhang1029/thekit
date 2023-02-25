@@ -79,10 +79,8 @@ static void ntp_update_rtc(time_t result, uint8_t stratum) {
     };
     printf("Got NTP response: %04d-%02d-%02d %02d:%02d:%02d\n",
            dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
-    if (rtc_set_datetime(&dt)) {
+    if (light_update_rtc_and_register_next_alarm(&dt)) {
         puts("RTC set");
-        // Note that `light_register_next_alarm` modifies `dt` so make sure we don't need it anymore
-        light_register_next_alarm(&dt);
         ntp_stratum = stratum + 1;
     }
 }
@@ -159,6 +157,18 @@ void ntp_client_check_run(struct ntp_client *state) {
     struct ntp_client_current_request *req = &state->req;
     // `state` is zero-inited so it will always fire on the first time
     if (absolute_time_diff_us(get_absolute_time(), state->next_sync_time) < 0 && !req->in_progress) {
+#if ENABLE_GPS
+        extern volatile timestamp_t last_gps_rtc_update;
+        timestamp_t now = timestamp_micros();
+        if (now - last_gps_rtc_update < NTP_GPS_REJECTION_THRESHOLD) {
+            // GPS is working, skip NTP
+            ntp_stratum = 1;
+            return;
+        } else {
+            // GPS is not working, try NTP
+            puts("GPS not working, trying NTP");
+        }
+#endif
         // If we don't have GPS, we have to sync the time with NTP
         // Initialize a NTP sync
         req->in_progress = true;

@@ -77,6 +77,7 @@ void light_dim(float intensity);
 // Takes the current time to avoid wasting cycles waiting for RTC to be
 // synchronised. Might modify it.
 void light_register_next_alarm(datetime_t *current);
+bool light_update_rtc_and_register_next_alarm(datetime_t *current);
 
 bool wifi_connect(void);
 
@@ -90,7 +91,6 @@ void tasks_init(void);
 bool tasks_check_run(void);
 
 void gps_init(void);
-bool gps_get_time(datetime_t *dt, timestamp_t *age);
 bool gps_get_location(float *lat, float *lon, float *alt, timestamp_t *age);
 uint8_t gps_get_sat_num(void);
 void gps_parse_available(void);
