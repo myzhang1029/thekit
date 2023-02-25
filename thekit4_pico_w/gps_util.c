@@ -34,7 +34,7 @@
 #define assert_float_eq(a, b) assert(fabs((a) - (b)) < 1e-5)
 #endif
 
-#ifdef USE_RPIPICO_DIVIDER
+#ifdef RPI_PICO
 #include "pico/divider.h"
 #endif
 
@@ -234,7 +234,7 @@ static void test_parse_single_char(void) {
 static inline void parse_hms(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, uint8_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
     uint32_t hms = parse_integer(checksum, cursor, buffer, buffer_len);
     float sec_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
-#ifdef USE_RPIPICO_DIVIDER
+#ifdef RPI_PICO
     uint32_t sec_int;
     hms = divmod_u32u32_rem(hms, 100, &sec_int);
     uint32_t min32;
@@ -294,7 +294,7 @@ static void test_parse_hms(void) {
 static inline void parse_dm(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, uint8_t buffer_len, uint16_t *deg, float *min) {
     uint32_t dms = parse_integer(checksum, cursor, buffer, buffer_len);
     float min_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
-#ifdef USE_RPIPICO_DIVIDER
+#ifdef RPI_PICO
     uint32_t min_int;
     *deg = divmod_u32u32_rem(dms, 100, &min_int);
 #else
@@ -861,7 +861,7 @@ bool gpsutil_parse_sentence_unused(
     return check_checksum(checksum, cursor, buffer, buffer_len);
 }
 
-static void determine_time_validity(struct  gps_status *gps_status) {
+static void determine_time_validity(struct gps_status *gps_status) {
     // XXX: This is a bit of a hack, but it works for now
     gps_status->gps_time_valid = (
         gps_status->utc_year > 1000
@@ -881,6 +881,7 @@ static bool parse_sentence(struct gps_status *gps_status) {
     uint8_t cursor = 0;
     const char *buffer = gps_status->buffer;
     const uint8_t buffer_len = gps_status->buffer_pos;
+    timestamp_t now = timestamp_micros();
     // At least six characters
     if (buffer_len < 6) {
         return false;
@@ -931,6 +932,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_min = min;
                 gps_status->utc_sec = sec;
                 determine_time_validity(gps_status);
+                gps_status->last_position_update = now;
+                gps_status->last_time_update = now;
             }
             return result;
         }
@@ -951,6 +954,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_min = min;
                 gps_status->utc_sec = sec;
                 determine_time_validity(gps_status);
+                gps_status->last_position_update = now;
+                gps_status->last_time_update = now;
             }
             return result;
         }
@@ -971,6 +976,8 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_min = min;
                 gps_status->utc_sec = sec;
                 determine_time_validity(gps_status);
+                gps_status->last_position_update = now;
+                gps_status->last_time_update = now;
             }
             return result;
         }
@@ -993,6 +1000,7 @@ static bool parse_sentence(struct gps_status *gps_status) {
                 gps_status->utc_month = month;
                 gps_status->utc_day = day;
                 determine_time_validity(gps_status);
+                gps_status->last_time_update = now;
             }
             return result;
         }
@@ -1112,7 +1120,7 @@ void test_gpsutil_feed(void) {
 #endif
 
 /// Get the current time in UTC
-bool gpsutil_get_time(struct gps_status *gps_status, time_t *t) {
+bool gpsutil_get_time(const struct gps_status *gps_status, time_t *t, timestamp_t *timestamp) {
     if (!gps_status->gps_time_valid) {
         return false;
     }
@@ -1126,17 +1134,19 @@ bool gpsutil_get_time(struct gps_status *gps_status, time_t *t) {
     intermediate.tm_isdst = -1;
     // `mktime` ignores `wday` and `yday` which we don't have
     *t = mktime(&intermediate);
+    *timestamp = gps_status->last_time_update;
     return true;
 }
 
 /// Get the current GPS position
-bool gpsutil_get_location(struct gps_status *gps_status, float *lat, float *lon, float *alt) {
+bool gpsutil_get_location(const struct gps_status *gps_status, float *lat, float *lon, float *alt, timestamp_t *timestamp) {
     if (!gps_status->gps_valid) {
         return false;
     }
     *lat = gps_status->gps_lat;
     *lon = gps_status->gps_lon;
     *alt = gps_status->gps_alt;
+    *timestamp = gps_status->last_position_update;
     return true;
 }
 

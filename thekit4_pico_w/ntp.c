@@ -33,6 +33,12 @@
 #include "lwip/pbuf.h"
 #include "lwip/udp.h"
 
+
+#if ENABLE_NTP || ENABLE_GPS
+// Our current position in the stratum system
+uint8_t ntp_stratum = 16;
+#endif
+
 #if ENABLE_NTP
 
 static const uint16_t NTP_MSG_LEN = 48;
@@ -40,9 +46,6 @@ static const uint16_t NTP_MSG_LEN = 48;
 static const uint32_t NTP_DELTA = 2208988800;
 // Time to wait in case UDP requests are lost
 static const uint32_t UDP_TIMEOUT_TIME_MS = 10 * 1000;
-
-// Our current position in the stratum system
-uint8_t ntp_stratum = 16;
 
 /// Close this request
 static void ntp_req_close(struct ntp_client_current_request *req) {
@@ -156,22 +159,6 @@ void ntp_client_check_run(struct ntp_client *state) {
     struct ntp_client_current_request *req = &state->req;
     // `state` is zero-inited so it will always fire on the first time
     if (absolute_time_diff_us(get_absolute_time(), state->next_sync_time) < 0 && !req->in_progress) {
-#if ENABLE_GPS
-        datetime_t dt;
-        if (gps_get_time(&dt)) {
-            // GPS is valid, so use it
-            printf("Using GPS time: %04d-%02d-%02d %02d:%02d:%02d\n",
-                   dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
-            if (rtc_set_datetime(&dt)) {
-                puts("RTC set");
-                // Note that `light_register_next_alarm` modifies `dt` so make sure we don't need it anymore
-                light_register_next_alarm(&dt);
-            }
-            state->next_sync_time = make_timeout_time_ms(NTP_INTERVAL_MS);
-            ntp_stratum = 1;
-            return;
-        }
-#endif
         // If we don't have GPS, we have to sync the time with NTP
         // Initialize a NTP sync
         req->in_progress = true;

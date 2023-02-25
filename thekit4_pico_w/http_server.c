@@ -43,6 +43,8 @@
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
 
+#include "hardware/rtc.h"
+
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
 
@@ -162,7 +164,7 @@ static bool http_req_check_parse(struct http_server_conn *conn) {
         // unlikely
         || pbuf_memcmp(conn->received, offset_path, "/get_info\r", 2) == 0) {
         // Max length + nn\r\n\r\n + \0
-        char response[121] = {0};
+        char response[210] = {0};
         size_t length;
 #if ENABLE_TEMPERATURE_SENSOR
         float temperature = temperature_measure();
@@ -177,23 +179,49 @@ static bool http_req_check_parse(struct http_server_conn *conn) {
 #endif
 #if ENABLE_GPS
         float lat, lon, alt;
-        if (!gps_get_location(&lat, &lon, &alt)) {
+        timestamp_t gps_age;
+        bool gps_location_valid = gps_get_location(&lat, &lon, &alt, &gps_age);
+        if (!gps_get_location(&lat, &lon, &alt, &gps_age)) {
             lat = -1024;
             lon = -1024;
             alt = -1024;
         }
 #else
         float lat = -1024, lon = -1024, alt = -1024;
+        timestamp_t gps_age = 0;
+        bool gps_location_valid = false;
 #endif
+#if ENABLE_NTP || ENABLE_GPS
+        extern uint8_t ntp_stratum;
+#else
+        uint8_t ntp_stratum = 16;
+#endif
+        datetime_t dt;
+        if (!rtc_get_datetime(&dt)) {
+            dt.year = 0;
+            dt.month = 0;
+            dt.day = 0;
+            dt.hour = 0;
+            dt.min = 0;
+            dt.sec = 0;
+            dt.dotw = 0;
+        }
         /* Generate response */
-        length = snprintf(response, 121,
-                     "113\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u, "
-                     "\"latitude\": %.6f, \"longitude\": %.6f, \"altitude\": %.3f}",
-                     temperature, (unsigned)current_pwm_level, lat, lon, alt);
-        snprintf(response, 121, "%u\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u, "
-                "\"latitude\": %.6f, \"longitude\": %.6f, \"altitude\": %.3f}",
+        length = snprintf(response, 210,
+                     "202\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u, "
+                     "\"latitude\": %.6f, \"longitude\": %.6f, \"altitude\": %.3f, "
+                     "\"datetime\": \"%04u-%02u-%02u %02u:%02u:%02u\", "
+                     "\"stratum\": %u, \"gps_age\": %lu, \"gps_valid\": %u}",
+                     temperature, (unsigned)current_pwm_level, lat, lon, alt,
+                     dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec,
+                     (unsigned)ntp_stratum, (unsigned long)gps_age, (unsigned)gps_location_valid);
+        snprintf(response, 210, "%u\r\n\r\n{\"temperature\": %.3f, \"pwm\": %u, "
+                "\"latitude\": %.6f, \"longitude\": %.6f, \"altitude\": %.3f, "
+                "\"datetime\": \"%04u-%02u-%02u %02u:%02u:%02u\", "
+                "\"stratum\": %u, \"gps_age\": %lu, \"gps_valid\": %u}",
                  (unsigned)length - 7, temperature, (unsigned)current_pwm_level,
-                 lat, lon, alt);
+                 lat, lon, alt, dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec,
+                 (unsigned)ntp_stratum, (unsigned long)gps_age, (unsigned)gps_location_valid);
         http_conn_write(conn, resp_200_pre, sizeof(resp_200_pre) - 1, 0);
         http_conn_write(conn, resp_common, sizeof(resp_common) - 1, 0);
         // This one needs to be copied

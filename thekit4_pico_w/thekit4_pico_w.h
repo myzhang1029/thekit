@@ -23,6 +23,8 @@
 
 #include "lwip/ip_addr.h"
 
+#include "gps_util.h"
+
 #define WIFI_NETIF (cyw43_state.netif[CYW43_ITF_STA])
 
 #undef uint32_t
@@ -88,8 +90,8 @@ void tasks_init(void);
 bool tasks_check_run(void);
 
 void gps_init(void);
-bool gps_get_time(datetime_t *dt);
-bool gps_get_location(float *lat, float *lon, float *alt);
+bool gps_get_time(datetime_t *dt, timestamp_t *age);
+bool gps_get_location(float *lat, float *lon, float *alt, timestamp_t *age);
 uint8_t gps_get_sat_num(void);
 void gps_parse_available(void);
 

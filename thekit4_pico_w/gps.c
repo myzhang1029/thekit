@@ -48,10 +48,12 @@ void gps_init(void) {
     gpio_put(GPS_EN_PIN, 1);
 }
 
-bool gps_get_time(datetime_t *dt) {
+bool gps_get_time(datetime_t *dt, timestamp_t *age) {
     struct tm intermediate;
     time_t t;
-    if (!gpsutil_get_time(&gps_status, &t)) {
+    timestamp_t timestamp, now;
+    now = timestamp_micros();
+    if (!gpsutil_get_time(&gps_status, &t, &timestamp)) {
         return false;
     }
     gmtime_r(&t, &intermediate);
@@ -62,11 +64,18 @@ bool gps_get_time(datetime_t *dt) {
     dt->min = intermediate.tm_min;
     dt->sec = intermediate.tm_sec;
     dt->dotw = intermediate.tm_wday;
+    *age = now - timestamp;
     return true;
 }
 
-bool gps_get_location(float *lat, float *lon, float *alt) {
-    return gpsutil_get_location(&gps_status, lat, lon, alt);
+bool gps_get_location(float *lat, float *lon, float *alt, timestamp_t *age) {
+    timestamp_t timestamp, now;
+    now = timestamp_micros();
+    if (!gpsutil_get_location(&gps_status, lat, lon, alt, &timestamp)) {
+        return false;
+    }
+    *age = now - timestamp;
+    return true;
 }
 
 uint8_t gps_get_sat_num(void) {

@@ -26,6 +26,34 @@
 #include <stdint.h>
 #include <time.h>
 
+#if defined(ARDUINO)
+#if ARDUINO >= 100
+#include "Arduino.h"
+#else
+#include "WProgram.h"
+#endif
+typedef unsigned long timestamp_t;
+#define timestamp_micros() micros()
+#elif defined(RPI_PICO)
+#include "hardware/timer.h"
+typedef uint64_t timestamp_t;
+#define timestamp_micros() time_us_64()
+#elif defined(unix) || defined(__unix__) || defined(__unix) || defined(__APPLE__)
+typedef uint64_t timestamp_t;
+static inline timestamp_t timestamp_micros()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+#define HAVE_TIMESTAMP 1
+#else
+#warning "GPS timestamping is not implemented for this platform"
+#define HAVE_TIMESTAMP 0
+typedef uint64_t timestamp_t;
+#define timestamp_micros() 0
+#endif
+
 struct gps_status {
     // `true` if RMC gives 'A'
     bool gps_valid;
@@ -49,11 +77,15 @@ struct gps_status {
     // '$GNGGA,000000.000000,00000.000000,N,00000.000000,W,1,99,1.5,00000.000,M,00000.000,M,00.0,0000,*4D'
     // '$' is never included; the first character is the first character of the sentence type
     // The parser is immediately called once a newline is received.
-    char buffer[100];
+    char buffer[128];
     // Current position in buffer (also length used)
     uint8_t buffer_pos;
     // Whether we are currently in a sentence
     bool in_sentence;
+    // Timestamp of the previous update to the position
+    timestamp_t last_position_update;
+    // Timestamp of the previous update to the time
+    timestamp_t last_time_update;
 };
 
 #define GPS_STATUS_INIT { \
@@ -72,15 +104,17 @@ struct gps_status {
     .buffer = {0}, \
     .buffer_pos = 0, \
     .in_sentence = false, \
+    .last_position_update = 0, \
+    .last_time_update = 0, \
 }
 
 /// Feed a character to the parser, returns true if a sentence is parsed successfully
 bool gpsutil_feed(struct gps_status *gps_status, int c);
 
 /// Get the current time in UTC
-bool gpsutil_get_time(struct gps_status *gps_status, time_t *t);
+bool gpsutil_get_time(const struct gps_status *gps_status, time_t *t, timestamp_t *timestamp);
 
 /// Get the current GPS position
-bool gpsutil_get_location(struct gps_status *gps_status, float *lat, float *lon, float *alt);
+bool gpsutil_get_location(const struct gps_status *gps_status, float *lat, float *lon, float *alt, timestamp_t *timestamp);
 
 #endif

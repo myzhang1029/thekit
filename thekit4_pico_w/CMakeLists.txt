@@ -1,6 +1,6 @@
 add_executable(thekit4_pico_w thekit4_pico_w.c temperature.c gps.c gps_util.c light.c ntp.c tasks.c http_server.c wifi.c)
 
-target_compile_definitions(thekit4_pico_w PRIVATE USE_RPIPICO_DIVIDER=1)
+target_compile_definitions(thekit4_pico_w PRIVATE RPI_PICO=1)
 
 target_link_libraries(thekit4_pico_w
     pico_stdlib
