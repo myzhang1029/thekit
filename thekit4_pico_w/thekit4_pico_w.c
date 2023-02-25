@@ -48,6 +48,7 @@ static void init() {
 #if ENABLE_GPS
     gps_init();
 #endif
+    irq_init();
 
     if (cyw43_arch_init() != 0) {
         puts("WARNING: Cannot init CYW43");

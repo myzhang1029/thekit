@@ -173,6 +173,7 @@ static bool http_req_check_parse(struct http_server_conn *conn) {
         float temperature = -1024;
 #endif
 #if ENABLE_LIGHT
+        // defined in light.c
         extern uint16_t current_pwm_level;
 #else
         uint16_t current_pwm_level = 0;
@@ -192,6 +193,7 @@ static bool http_req_check_parse(struct http_server_conn *conn) {
         bool gps_location_valid = false;
 #endif
 #if ENABLE_NTP || ENABLE_GPS
+        // defined in ntp.c
         extern uint8_t ntp_stratum;
 #else
         uint8_t ntp_stratum = 16;

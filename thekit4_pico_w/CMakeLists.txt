@@ -1,4 +1,4 @@
-add_executable(thekit4_pico_w thekit4_pico_w.c temperature.c gps.c gps_util.c light.c ntp.c tasks.c http_server.c wifi.c)
+add_executable(thekit4_pico_w thekit4_pico_w.c temperature.c gps.c gps_util.c irq.c light.c ntp.c tasks.c http_server.c wifi.c)
 
 target_compile_definitions(thekit4_pico_w PRIVATE RPI_PICO=1)
 

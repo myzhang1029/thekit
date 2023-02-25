@@ -31,7 +31,6 @@
 typedef u32_t uint32_t;
 
 struct ntp_client {
-    absolute_time_t next_sync_time;
     struct ntp_client_current_request {
         bool in_progress;
         ip_addr_t server_address;
@@ -69,6 +68,8 @@ struct wifi_config_entry {
 
 extern bool has_cyw43;
 
+void irq_init(void);
+
 void temperature_init(void);
 float temperature_measure(void);
 
@@ -77,12 +78,12 @@ void light_dim(float intensity);
 // Takes the current time to avoid wasting cycles waiting for RTC to be
 // synchronised. Might modify it.
 void light_register_next_alarm(datetime_t *current);
-bool light_update_rtc_and_register_next_alarm(datetime_t *current);
 
 bool wifi_connect(void);
 
 bool ntp_client_init(struct ntp_client *state);
 void ntp_client_check_run(struct ntp_client *state);
+void update_rtc(time_t result, uint8_t stratum);
 
 bool http_server_open(struct http_server *state);
 void http_server_close(struct http_server *arg);
@@ -92,6 +93,7 @@ bool tasks_check_run(void);
 
 void gps_init(void);
 bool gps_get_location(float *lat, float *lon, float *alt, timestamp_t *age);
+bool gps_get_time(time_t *time, timestamp_t *age);
 uint8_t gps_get_sat_num(void);
 void gps_parse_available(void);
 

@@ -36,7 +36,34 @@
 
 #if ENABLE_NTP || ENABLE_GPS
 // Our current position in the stratum system
-uint8_t ntp_stratum = 16;
+// used in http_server.c
+volatile uint8_t ntp_stratum = 16;
+static volatile absolute_time_t next_sync_time;
+
+// We should allow calling this from an ISR
+void update_rtc(time_t result, uint8_t stratum) {
+    // Timezone correction
+    time_t lresult = result + TZ_DIFF_SEC;
+    struct tm *lt = gmtime(&lresult);
+    datetime_t dt = {
+        .year  = lt->tm_year + 1900,
+        .month = lt->tm_mon + 1,
+        .day = lt->tm_mday,
+        .dotw = lt->tm_wday,
+        .hour = lt->tm_hour,
+        .min = lt->tm_min,
+        .sec = lt->tm_sec
+    };
+    if (rtc_set_datetime(&dt)) {
+        ntp_stratum = stratum + 1;
+        // So that NTP is not run when we have GPS time
+        next_sync_time = make_timeout_time_ms(NTP_INTERVAL_MS);
+    }
+#if ENABLE_LIGHT
+    // Note that this function alters `dt`
+    light_register_next_alarm(&dt);
+#endif
+}
 #endif
 
 #if ENABLE_NTP
@@ -65,26 +92,6 @@ static void ntp_req_close(struct ntp_client_current_request *req) {
     req->in_progress = false;
 }
 
-static void ntp_update_rtc(time_t result, uint8_t stratum) {
-    time_t lresult = result + TZ_DIFF_SEC;
-    struct tm *lt = gmtime(&lresult);
-    datetime_t dt = {
-        .year  = lt->tm_year + 1900,
-        .month = lt->tm_mon + 1,
-        .day = lt->tm_mday,
-        .dotw = lt->tm_wday,
-        .hour = lt->tm_hour,
-        .min = lt->tm_min,
-        .sec = lt->tm_sec
-    };
-    printf("Got NTP response: %04d-%02d-%02d %02d:%02d:%02d\n",
-           dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
-    if (light_update_rtc_and_register_next_alarm(&dt)) {
-        puts("RTC set");
-        ntp_stratum = stratum + 1;
-    }
-}
-
 static int64_t ntp_timeout_alarm_cb(alarm_id_t id, void *user_data)
 {
     struct ntp_client_current_request *req = (struct ntp_client_current_request *)user_data;
@@ -108,7 +115,7 @@ static void ntp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip
         uint32_t seconds_since_1900 = seconds_buf[0] << 24 | seconds_buf[1] << 16 | seconds_buf[2] << 8 | seconds_buf[3];
         uint32_t seconds_since_1970 = seconds_since_1900 - NTP_DELTA;
         time_t epoch = seconds_since_1970;
-        ntp_update_rtc(epoch, stratum);
+        update_rtc(epoch, stratum);
     } else {
         puts("Invalid NTP response");
     }
@@ -146,7 +153,7 @@ bool ntp_client_init(struct ntp_client *state) {
     state->req.pcb = NULL;
     state->req.resend_alarm = 0;
     // So that next check_run is triggered
-    state->next_sync_time = get_absolute_time();
+    next_sync_time = get_absolute_time();
     return true;
 }
 
@@ -156,20 +163,9 @@ void ntp_client_check_run(struct ntp_client *state) {
         return;
     struct ntp_client_current_request *req = &state->req;
     // `state` is zero-inited so it will always fire on the first time
-    if (absolute_time_diff_us(get_absolute_time(), state->next_sync_time) < 0 && !req->in_progress) {
-#if ENABLE_GPS
-        extern volatile timestamp_t last_gps_rtc_update;
-        timestamp_t now = timestamp_micros();
-        if (now - last_gps_rtc_update < NTP_GPS_REJECTION_THRESHOLD) {
-            // GPS is working, skip NTP
-            ntp_stratum = 1;
-            return;
-        } else {
-            // GPS is not working, try NTP
-            puts("GPS not working, trying NTP");
-        }
-#endif
-        // If we don't have GPS, we have to sync the time with NTP
+    // If GPS sync succeeded, `next_sync_time` should be set to a newer value,
+    // so this branch will not be taken
+    if (absolute_time_diff_us(get_absolute_time(), next_sync_time) < 0 && !req->in_progress) {
         // Initialize a NTP sync
         req->in_progress = true;
         cyw43_arch_lwip_begin();
@@ -197,7 +193,8 @@ void ntp_client_check_run(struct ntp_client *state) {
             // Now calling `req_close` is safe because it does not call `udp_remove` on NULL
             ntp_req_close(req);
         }
-        state->next_sync_time = make_timeout_time_ms(NTP_INTERVAL_MS);
+        // No matter the result, set the next sync time to be in the future
+        next_sync_time = make_timeout_time_ms(NTP_INTERVAL_MS);
     }
 }
 

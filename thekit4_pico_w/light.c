@@ -23,15 +23,15 @@
 
 #include "pico/stdlib.h"
 #include "pico/util/datetime.h"
+
 #include "hardware/pwm.h"
 #include "hardware/rtc.h"
 
 #if ENABLE_LIGHT
 
 /// Initialize everything we need
-uint16_t current_pwm_level = 0;
-
-uint32_t last_irq_timestamp = 0;
+/// used in irq.c and http_server.c
+volatile uint16_t current_pwm_level = 0;
 
 // For rtc alarm
 static void light_on(void) {
@@ -45,25 +45,11 @@ static void light_off(void) {
     pwm_set_gpio_level(LIGHT_PIN, current_pwm_level);
 }
 
-// For gpio irq
-static void light_toggle(uint gpio, uint32_t events) {
-    if (gpio != BUTTON1_PIN || !(events & BUTTON1_EDGE_TYPE))
-        return;
-    // Debounce
-    uint32_t irq_timestamp = time_us_32();
-    if (irq_timestamp - last_irq_timestamp < 8000)
-        return;
-    last_irq_timestamp = irq_timestamp;
-    current_pwm_level = current_pwm_level ? 0 : WRAP;
-    pwm_set_gpio_level(LIGHT_PIN, current_pwm_level);
-    puts("Toggling");
-}
-
 void light_init(void) {
     // IO
     gpio_set_function(LIGHT_PIN, GPIO_FUNC_PWM);
-    gpio_set_irq_enabled_with_callback(BUTTON1_PIN, BUTTON1_EDGE_TYPE, true, light_toggle);
-    gpio_pull_up(BUTTON1_PIN);
+
+    // Button is set up in irq.c
 
     // PWM
     uint light_slice_num = pwm_gpio_to_slice_num(LIGHT_PIN);
@@ -176,14 +162,6 @@ void light_register_next_alarm(datetime_t *current) {
     // We past the last one. Register the first alarm after incrementing `day`
     next_day(current);
     do_register_alarm(current, 0);
-}
-
-/// Convenient function to update the rtc and register the next alarm
-/// Note that `light_register_next_alarm` modifies `dt` so make sure we don't need it anymore
-bool light_update_rtc_and_register_next_alarm(datetime_t *current) {
-    bool result = rtc_set_datetime(current);
-    light_register_next_alarm(current);
-    return result;
 }
 
 #endif

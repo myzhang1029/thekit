@@ -107,8 +107,6 @@ static const uint GPS_EN_PIN = 14;
 static const uint GPS_PPS_PIN = 15;
 static const uint GPS_BAUD = 9600;
 #define PPS_EDGE_TYPE GPIO_IRQ_EDGE_RISE
-// in microseconds
-#define NTP_GPS_REJECTION_THRESHOLD 2000000
 #endif
 
 // Networking-related
