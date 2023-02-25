@@ -34,6 +34,10 @@
 #define assert_float_eq(a, b) assert(fabs((a) - (b)) < 1e-5)
 #endif
 
+#ifdef USE_RPIPICO_DIVIDER
+#include "pico/divider.h"
+#endif
+
 /// Lookup table for scaling floats
 static const float NEGPOW_10[] = {1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7};
 static const uint8_t NEGPOW_10_LEN = sizeof(NEGPOW_10) / sizeof(NEGPOW_10[0]);
@@ -208,10 +212,18 @@ static void test_parse_single_char(void) {
 static inline void parse_hms(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
     uint32_t hms = parse_integer(checksum, cursor, buffer, buffer_len);
     float sec_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
+#ifdef USE_RPIPICO_DIVIDER
+    uint32_t sec_int;
+    hms = divmod_u32u32_rem(hms, 100, &sec_int);
+    uint32_t min32;
+    *hour = divmod_u32u32_rem(hms, 100, &min32);
+    *min = min32;
+#else
     uint8_t sec_int = hms % 100;
     hms /= 100;
     *min = hms % 100;
     *hour = hms / 100;
+#endif
     *sec = sec_int + sec_float;
 }
 
@@ -259,8 +271,13 @@ static void test_parse_hms(void) {
 static inline void parse_dm(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len, uint16_t *deg, float *min) {
     uint32_t dms = parse_integer(checksum, cursor, buffer, buffer_len);
     float min_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
+#ifdef USE_RPIPICO_DIVIDER
+    uint32_t min_int;
+    *deg = divmod_u32u32_rem(dms, 100, &min_int);
+#else
     uint8_t min_int = dms % 100;
     *deg = dms / 100;
+#endif
     *min = min_int + min_float;
 }
 
