@@ -38,6 +38,12 @@
 #include "pico/divider.h"
 #endif
 
+#ifdef __GNUC__
+#define unlikely(x) __builtin_expect((x), 0)
+#else
+#define unlikely(x) (x)
+#endif
+
 /// Lookup table for scaling floats
 static const float NEGPOW_10[] = {1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7};
 static const uint8_t NEGPOW_10_LEN = sizeof(NEGPOW_10) / sizeof(NEGPOW_10[0]);
@@ -61,7 +67,9 @@ static inline uint32_t parse_integer(uint8_t *checksum, uint8_t *cursor, const c
     const char *end = buffer + buffer_len;
     buffer += *cursor;
 
-    while (isdigit(c = *buffer) && buffer < end) {
+    // This ordering is faster for real NMEA sentences
+    // (contrary to what I thought before)
+    while (buffer < end && isdigit(c = *buffer)) {
         value = value * 10 + c - '0';
         our_checksum ^= c;
         buffer++;
@@ -96,7 +104,7 @@ static void test_parse_integer(void) {
 #endif
 
 /// Parse a floating point number from the decimal point
-static inline float parse_float_decimal(uint8_t *checksum, uint8_t *cursor, const char *buffer, const uint8_t buffer_len) {
+static inline float parse_float_decimal(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, const uint8_t buffer_len) {
     const char *end = buffer + buffer_len;
     buffer += *cursor;
     // Return 0.0 if the first character is not a decimal point or the buffer is exhausted
@@ -106,13 +114,26 @@ static inline float parse_float_decimal(uint8_t *checksum, uint8_t *cursor, cons
     uint8_t our_checksum = *checksum ^ '.';
     uint32_t value = 0;
     uint8_t digits = 0;
-    uint8_t c;
-    // The same logic as `parse_integer`, but stops when the number of digits exceeds the length of the lookup table
-    while (isdigit(c = *buffer) && buffer < end && digits < NEGPOW_10_LEN) {
-        value = value * 10 + c - '0';
+    // The same logic as `parse_integer`,
+    // but stops changing the result when the number of digits
+    // exceeds the length of the lookup table
+    while (1) {
+        if (buffer >= end) {
+            break;
+        }
+        uint8_t c = *buffer;
+        if (!isdigit(c)) {
+            break;
+        }
+        // This `unlikely` does assist the compiler according to benchmarks
+        if (unlikely(digits < NEGPOW_10_LEN)) {
+            // Push the decimal only if we have enough space in the lookup table
+            // That is, discard additional decimal places
+            value = value * 10 + c - '0';
+            digits++;
+        }
         our_checksum ^= c;
         buffer++;
-        digits++;
     }
     *checksum = our_checksum;
     *cursor += digits + 1;
@@ -121,7 +142,7 @@ static inline float parse_float_decimal(uint8_t *checksum, uint8_t *cursor, cons
 }
 
 /// Parse a floating point number and stop at the first non-number character
-static inline float parse_float(uint8_t *checksum, uint8_t *cursor, const char *buffer, const uint8_t buffer_len) {
+static inline float parse_float(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, const uint8_t buffer_len) {
     if (buffer_len - *cursor >= 1) {
         bool negative = false;
         if (buffer[*cursor] == '-') {
@@ -167,14 +188,14 @@ static void test_parse_float(void) {
 #endif
 
 /// Take a single character.
-/// If the following character is a comma or an asterisk, return EOF and the cursor and the checksum are not modified.
-static inline int16_t parse_single_char(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len) {
-    if (*cursor >= buffer_len) {
-        return EOF;
+/// If the following character is a comma or an asterisk, return 0 and the cursor and the checksum are not modified.
+static inline uint8_t parse_single_char(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len) {
+    if (unlikely(*cursor >= buffer_len)) {
+        return 0;
     }
-    char c = buffer[*cursor];
+    uint8_t c = buffer[*cursor];
     if (c == ',' || c == '*') {
-        return EOF;
+        return 0;
     }
     *checksum ^= c;
     (*cursor)++;
@@ -202,14 +223,15 @@ static void test_parse_single_char(void) {
     assert_eq(parse_single_char(&checksum, &cursor, buffer, buffer_len), '5');
     assert_eq(checksum, 49);
     assert_eq(cursor, 5);
-    assert_eq(parse_single_char(&checksum, &cursor, buffer, buffer_len), EOF);
+    assert_eq(parse_single_char(&checksum, &cursor, buffer, buffer_len), 0);
     assert_eq(checksum, 49);
     assert_eq(cursor, 5);
 }
 #endif
 
 /// Parse a h?hmmss.?s* string.
-static inline void parse_hms(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
+/// `restrict` is propagated from `parse_float_decimal`.
+static inline void parse_hms(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, uint8_t buffer_len, uint8_t *hour, uint8_t *min, float *sec) {
     uint32_t hms = parse_integer(checksum, cursor, buffer, buffer_len);
     float sec_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
 #ifdef USE_RPIPICO_DIVIDER
@@ -268,7 +290,8 @@ static void test_parse_hms(void) {
 #endif
 
 /// Parse a d?d?dmm.?m* string.
-static inline void parse_dm(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len, uint16_t *deg, float *min) {
+/// `restrict` is propagated from `parse_float_decimal`.
+static inline void parse_dm(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, uint8_t buffer_len, uint16_t *deg, float *min) {
     uint32_t dms = parse_integer(checksum, cursor, buffer, buffer_len);
     float min_float = parse_float_decimal(checksum, cursor, buffer, buffer_len);
 #ifdef USE_RPIPICO_DIVIDER
@@ -336,7 +359,7 @@ static void test_check_checksum(void) {
 }
 #endif
 
-static inline void consume_until_checksum(uint8_t *checksum, uint8_t *cursor, const char *buffer, uint8_t buffer_len) {
+static inline void consume_until_checksum(uint8_t *checksum, uint8_t *restrict cursor, const char *buffer, uint8_t buffer_len) {
     while (*cursor < buffer_len) {
         char c = buffer[(*cursor)++];
         if (c == '*') {
@@ -367,14 +390,14 @@ bool gpsutil_parse_sentence_gga(
     uint16_t deg;
     float min_parser;
     parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
-    *lat = (float)deg + min_parser / 60.0;
+    *lat = (float)deg + min_parser / 60.0f;
     COMMA_OR_FAIL(cursor);
-    int16_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
+    uint8_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'S') {
         *lat = -*lat;
     } else if (next == 'N') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
@@ -382,14 +405,14 @@ bool gpsutil_parse_sentence_gga(
     }
     COMMA_OR_FAIL(cursor);
     parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
-    *lon = (float)deg + min_parser / 60.0;
+    *lon = (float)deg + min_parser / 60.0f;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'W') {
         *lon = -*lon;
     } else if (next == 'E') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
@@ -407,7 +430,7 @@ bool gpsutil_parse_sentence_gga(
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'M') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
@@ -511,14 +534,14 @@ bool gpsutil_parse_sentence_gll(
     uint16_t deg;
     float min_parser;
     parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
-    *lat = (float)deg + min_parser / 60.0;
+    *lat = (float)deg + min_parser / 60.0f;
     COMMA_OR_FAIL(cursor);
-    int16_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
+    uint8_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'S') {
         *lat = -*lat;
     } else if (next == 'N') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
@@ -526,14 +549,14 @@ bool gpsutil_parse_sentence_gll(
     }
     COMMA_OR_FAIL(cursor);
     parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
-    *lon = (float)deg + min_parser / 60.0;
+    *lon = (float)deg + min_parser / 60.0f;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'W') {
         *lon = -*lon;
     } else if (next == 'E') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
@@ -547,7 +570,7 @@ bool gpsutil_parse_sentence_gll(
         *valid = true;
     } else if (next == 'V') {
         *valid = false;
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
         *valid = false;
     } else {
@@ -617,12 +640,12 @@ bool gpsutil_parse_sentence_rmc(
     parse_hms(&checksum, &cursor, buffer, buffer_len, hour, min, sec);
     COMMA_OR_FAIL(cursor);
     // Valid
-    int16_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
+    uint8_t next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'A') {
         *valid = true;
     } else if (next == 'V') {
         *valid = false;
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
         *valid = false;
     } else {
@@ -634,14 +657,14 @@ bool gpsutil_parse_sentence_rmc(
     uint16_t deg;
     float min_parser;
     parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
-    *lat = (float)deg + min_parser / 60.0;
+    *lat = (float)deg + min_parser / 60.0f;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'S') {
         *lat = -*lat;
     } else if (next == 'N') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
@@ -650,14 +673,14 @@ bool gpsutil_parse_sentence_rmc(
     COMMA_OR_FAIL(cursor);
     // Longitude
     parse_dm(&checksum, &cursor, buffer, buffer_len, &deg, &min_parser);
-    *lon = (float)deg + min_parser / 60.0;
+    *lon = (float)deg + min_parser / 60.0f;
     COMMA_OR_FAIL(cursor);
     next = parse_single_char(&checksum, &cursor, buffer, buffer_len);
     if (next == 'W') {
         *lon = -*lon;
     } else if (next == 'E') {
         // Nothing to do
-    } else if (next == EOF) {
+    } else if (next == 0) {
         // Empty field
     } else {
         // Invalid value
